@@ -1,4 +1,4 @@
-name: CI
+name: 持续检查
 
 on:
   pull_request:
@@ -15,41 +15,41 @@ concurrency:
 
 jobs:
   quality:
-    name: stable quality checks
+    name: 稳定版质量检查
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Check formatting
+      - name: 检查代码格式
         run: cargo fmt --all -- --check
-      - name: Run Clippy
+      - name: 运行 Clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
-      - name: Run tests
+      - name: 运行测试
         run: cargo test --locked --workspace
-      - name: Build release binary
+      - name: 构建发布程序
         run: cargo build --locked --release --workspace
-      - name: Validate release metadata
+      - name: 检查发布元数据
         run: |
           version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
           scripts/check-release.sh "v${version}" target/release/flowwatch
-      - name: Validate shell scripts
+      - name: 检查 Shell 脚本
         run: |
           sh -n scripts/install.sh
           sh -n scripts/check-release.sh
           sh -n scripts/test-installer.sh
-      - name: Test installer verification
+      - name: 测试安装包校验
         run: scripts/test-installer.sh
 
   msrv:
-    name: Rust 1.88 on Intel macOS
+    name: Intel macOS 上的 Rust 1.88
     runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v5
-      - name: Install minimum Rust toolchain
+      - name: 安装最低支持的 Rust 工具链
         run: rustup toolchain install 1.88.0 --profile minimal
-      - name: Test minimum supported Rust version
+      - name: 测试最低支持的 Rust 版本
         run: cargo +1.88.0 test --locked --workspace
-      - name: Build minimum supported Rust version
+      - name: 使用最低支持的 Rust 版本构建
         run: cargo +1.88.0 build --locked --release --workspace

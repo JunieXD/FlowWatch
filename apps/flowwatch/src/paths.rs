@@ -16,8 +16,8 @@ pub struct AppPaths {
 impl AppPaths {
     pub fn discover(database_override: Option<PathBuf>) -> Result<Self> {
         let project = ProjectDirs::from("io.github", "FlowWatch", "FlowWatch")
-            .context("resolve FlowWatch application directories")?;
-        let base = BaseDirs::new().context("resolve user home directory")?;
+            .context("无法确定 FlowWatch 数据目录")?;
+        let base = BaseDirs::new().context("无法确定用户主目录")?;
         let data_dir = project.data_dir().to_path_buf();
         let default_database = data_dir.join("traffic.sqlite3");
         let database = database_override.unwrap_or_else(|| default_database.clone());

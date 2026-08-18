@@ -85,11 +85,11 @@ impl ClashSampler {
             request =
                 request.with_header("Authorization", format!("Bearer {}", self.config.secret));
         }
-        let response = request.send().context("request Clash connections")?;
+        let response = request.send().context("无法读取 Clash 连接信息")?;
         if response.status_code < 200 || response.status_code >= 300 {
-            bail!("Clash controller returned HTTP {}", response.status_code);
+            bail!("Clash 控制器返回 HTTP {}", response.status_code);
         }
-        let payload: ConnectionsPayload = response.json().context("decode Clash response")?;
+        let payload: ConnectionsPayload = response.json().context("无法解析 Clash 返回的数据")?;
         Ok(self.sample_payload(payload, now, resolver))
     }
 
@@ -318,7 +318,7 @@ fn connections_url(controller: &str) -> Result<String> {
     let raw = if raw.starts_with("http://") {
         raw.to_string()
     } else if raw.contains("://") {
-        bail!("only local http Clash controllers are supported in v0.1")
+        bail!("目前只支持本机 HTTP Clash 控制器")
     } else {
         format!("http://{raw}")
     };
@@ -338,7 +338,7 @@ fn connections_url(controller: &str) -> Result<String> {
         authority
     };
     if !LOOPBACK.contains(&host) && host != "0.0.0.0" {
-        bail!("Clash controller must be bound to localhost in v0.1");
+        bail!("Clash 控制器必须监听本机地址");
     }
     Ok(format!("{raw}/connections"))
 }

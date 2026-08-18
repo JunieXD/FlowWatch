@@ -97,44 +97,52 @@ fn status(paths: &AppPaths) -> Result<()> {
         .and_then(|value| value.parse().ok());
     let running = pid.is_some_and(process_is_running);
 
-    println!("FlowWatch status");
+    println!("FlowWatch 状态");
     println!(
-        "  Collector: {}{}",
-        if running { "running" } else { "not running" },
-        pid.map_or_else(String::new, |pid| format!(" (pid {pid})"))
+        "  采集服务：{}{}",
+        if running { "运行中" } else { "未运行" },
+        pid.map_or_else(String::new, |pid| format!("（进程号 {pid}）"))
     );
     println!(
-        "  Last flush: {}",
+        "  最近保存：{}",
         meta_timestamp(&meta, "last_flush_at", now)
     );
     println!(
-        "  Database:   {} ({})",
+        "  数据库：{}（{}）",
         paths.database.display(),
         human_bytes(database.size_bytes())
     );
-    println!("  Integrity:  {}", database.integrity_check()?);
+    let integrity = database.integrity_check()?;
+    println!(
+        "  数据库检查：{}",
+        if integrity == "ok" {
+            "正常"
+        } else {
+            &integrity
+        }
+    );
     if let Some(engine) = meta.get("collector_engine") {
-        println!("  Engine:     {engine}");
+        println!("  采集方式：{}", collector_engine_label(engine));
     }
     println!(
-        "  App detail: {}",
+        "  应用明细：{}",
         app_granularity_label(app_bucket_seconds(&database)?)
     );
     println!();
-    println!("Today");
+    println!("今天");
     println!(
-        "  Physical:   up {}  down {}",
+        "  实际总量：上传 {}  下载 {}",
         human_bytes(physical.0),
         human_bytes(physical.1)
     );
     if attribution_start > start {
         println!(
-            "  Attribution since {}",
+            "  应用识别从 {} 开始统计",
             format_timestamp(attribution_start)
         );
     }
     println!(
-        "  Attributed: up {}  down {}  ({})",
+        "  已识别应用：上传 {}  下载 {}（{}）",
         human_bytes(attributed.0),
         human_bytes(attributed.1),
         coverage(attributed, attribution_physical)
@@ -144,31 +152,31 @@ fn status(paths: &AppPaths) -> Result<()> {
             proxy.upload.saturating_sub(proxy.attributed_upload),
             proxy.download.saturating_sub(proxy.attributed_download),
         );
-        println!("  Clash:");
+        println!("  Clash 流量：");
         println!(
-            "    Total:        up {}  down {}",
+            "    总量：上传 {}  下载 {}",
             human_bytes(proxy.upload),
             human_bytes(proxy.download),
         );
         println!(
-            "    Attributed:   up {}  down {}",
+            "    已识别应用：上传 {}  下载 {}",
             human_bytes(proxy.attributed_upload),
             human_bytes(proxy.attributed_download),
         );
         println!(
-            "    Unattributed: up {}  down {}",
+            "    未识别：上传 {}  下载 {}",
             human_bytes(unattributed.0),
             human_bytes(unattributed.1),
         );
         if unknown_clash.0 > 0 || unknown_clash.1 > 0 {
             println!(
-                "    Unknown app:  up {}  down {} (included in unattributed)",
+                "    未知应用：上传 {}  下载 {}（已计入未识别）",
                 human_bytes(unknown_clash.0),
                 human_bytes(unknown_clash.1),
             );
         }
         println!(
-            "    Coverage:     {}",
+            "    应用识别：{}",
             coverage(
                 (proxy.attributed_upload, proxy.attributed_download),
                 (proxy.upload, proxy.download),
@@ -183,16 +191,16 @@ fn status(paths: &AppPaths) -> Result<()> {
                         .saturating_sub(classified.actor_download),
                 );
                 println!(
-                    "    Classification since {}:",
+                    "    详细分类从 {} 开始统计：",
                     format_timestamp(clash_actor_start)
                 );
                 println!(
-                    "      Observed actor:       up {}  down {}",
+                    "      已观察到来源的连接：上传 {}  下载 {}",
                     human_bytes(classified.actor_upload),
                     human_bytes(classified.actor_download),
                 );
                 println!(
-                    "      App-attributed actor: up {}  down {}  ({})",
+                    "      已识别到应用的连接：上传 {}  下载 {}（{}）",
                     human_bytes(classified.attributed_upload),
                     human_bytes(classified.attributed_download),
                     coverage(
@@ -201,14 +209,14 @@ fn status(paths: &AppPaths) -> Result<()> {
                     )
                 );
                 println!(
-                    "      Non-actor/unobserved:  up {}  down {}",
+                    "      内部或未观察到的连接：上传 {}  下载 {}",
                     human_bytes(non_actor.0),
                     human_bytes(non_actor.1),
                 );
             }
-            _ => println!("    Actor-byte classification is waiting for a complete new minute."),
+            _ => println!("    详细分类将在采满一个完整分钟后显示。"),
         }
-        println!("    Note: unobserved includes short flows missed between controller samples.");
+        println!("    说明：很短的连接可能在两次采样之间结束，因此只能计入总量。");
     }
     let active_clash = meta_number(&meta, "active_clash_flows");
     let actor_clash = meta_number(&meta, "actor_clash_flows");
@@ -217,17 +225,17 @@ fn status(paths: &AppPaths) -> Result<()> {
     let fallback_clash = meta_number(&meta, "fallback_identifiable_clash_flows");
     if active_clash > 0 {
         println!(
-            "  Clash flows: {active_clash} active, {actor_clash} actor, {identifiable_clash} app-identifiable"
+            "  Clash 连接：活跃 {active_clash} 个，带来源信息 {actor_clash} 个，已识别应用 {identifiable_clash} 个"
         );
         if fallback_clash > 0 {
             println!(
-                "               {metadata_clash} from controller, {fallback_clash} from local sockets"
+                "              其中控制器提供 {metadata_clash} 个，本机连接匹配 {fallback_clash} 个"
             );
         }
     }
     if !anomalies.is_empty() {
         println!(
-            "  Quality:    warning: {} completed 5-minute direct bucket(s) exceed physical bounds",
+            "  数据警告：有 {} 个已完成的五分钟直连记录超过网卡实际流量",
             anomalies.len()
         );
     }
@@ -256,56 +264,46 @@ fn apps(paths: &AppPaths, args: QueryArgs) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&output)?);
         return Ok(());
     }
-    println!("Application traffic ({})", range.label);
+    println!("应用流量（{}）", range.label);
     if range.start > requested_start {
         println!(
-            "Attribution data starts at {}; earlier bytes in the requested range are excluded.",
+            "应用流量记录从 {} 开始；所选范围中更早的流量不计入本表。",
             format_timestamp(range.start)
         );
     }
     if range.exact {
         println!(
-            "Resolution: current app detail is {}; retained older data may use five-minute buckets.",
+            "统计精度：当前{}保存一次；较早的记录可能每五分钟保存一次。",
             app_granularity_label(app_bucket_seconds(&database)?)
         );
     }
     println!(
-        "{:<3} {:>11} {:>11} {:>11}  Application",
-        "#", "Upload", "Download", "Total"
+        "{:<4} {:>11} {:>11} {:>11}  应用",
+        "序号", "上传", "下载", "合计"
     );
     for (index, row) in rows.iter().enumerate() {
         let identity_summary = if row.identity_count > 1 || row.executable_paths.len() > 1 {
             format!(
-                " ({} {}, {} {})",
+                "（合并显示 {} 个同名程序，来自 {} 个路径）",
                 row.identity_count,
-                if row.identity_count == 1 {
-                    "identity"
-                } else {
-                    "identities"
-                },
                 row.executable_paths.len(),
-                if row.executable_paths.len() == 1 {
-                    "path"
-                } else {
-                    "paths"
-                }
             )
         } else {
             String::new()
         };
         println!(
-            "{:<3} {:>11} {:>11} {:>11}  {}{} [{}]",
+            "{:<4} {:>11} {:>11} {:>11}  {}{} [{}]",
             index + 1,
             human_bytes(row.upload()),
             human_bytes(row.download()),
             human_bytes(row.upload().saturating_add(row.download())),
-            row.app.name,
+            display_app_name(&row.app.name),
             identity_summary,
             sources(row),
         );
     }
     if rows.is_empty() {
-        println!("No application samples in this period.");
+        println!("所选时间内没有应用流量记录。");
     }
     Ok(())
 }
@@ -322,13 +320,13 @@ fn interfaces(paths: &AppPaths, args: QueryArgs) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(());
     }
-    println!("Physical interface traffic ({})", range.label);
+    println!("网卡实际流量（{}）", range.label);
     if range.exact {
-        println!("Resolution: one-minute buckets that overlap the requested range.");
+        println!("统计精度：显示与所选范围有重叠的每分钟记录。");
     }
     println!(
         "{:<12} {:>12} {:>12} {:>12}",
-        "Interface", "Upload", "Download", "Total"
+        "网卡", "上传", "下载", "合计"
     );
     for row in &rows {
         println!(
@@ -340,7 +338,7 @@ fn interfaces(paths: &AppPaths, args: QueryArgs) -> Result<()> {
         );
     }
     if rows.is_empty() {
-        println!("No physical-interface samples in this period.");
+        println!("所选时间内没有网卡流量记录。");
     }
     Ok(())
 }
@@ -357,13 +355,13 @@ fn spikes(paths: &AppPaths, args: QueryArgs) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(());
     }
-    println!("Highest-traffic minutes ({})", range.label);
+    println!("流量最高的分钟（{}）", range.label);
     if range.exact {
-        println!("Resolution: one-minute buckets that overlap the requested range.");
+        println!("统计精度：显示与所选范围有重叠的每分钟记录。");
     }
     println!(
         "{:<20} {:>12} {:>12} {:>12}",
-        "Minute", "Upload", "Download", "Total"
+        "时间", "上传", "下载", "合计"
     );
     for row in &rows {
         println!(
@@ -375,7 +373,7 @@ fn spikes(paths: &AppPaths, args: QueryArgs) -> Result<()> {
         );
     }
     if rows.is_empty() {
-        println!("No minute samples in this period (fine detail is retained for a limited time).");
+        println!("所选时间内没有分钟记录；分钟明细只保留有限天数。");
     }
     Ok(())
 }
@@ -401,19 +399,19 @@ fn gaps(paths: &AppPaths, args: QueryArgs) -> Result<()> {
         return Ok(());
     }
     println!(
-        "Attribution gaps ({}; {} buckets)",
+        "未识别流量（{}；{}一组）",
         range.label,
         app_granularity_label(bucket_seconds)
     );
     if range.start > requested_start {
         println!(
-            "Attribution data starts at {}; earlier bytes in the requested range are excluded.",
+            "应用流量记录从 {} 开始；所选范围中更早的流量不计入本表。",
             format_timestamp(range.start)
         );
     }
     println!(
         "{:<20} {:>12} {:>12} {:>12} {:>12}",
-        "Bucket", "Physical", "Attributed", "Gap", "Clash gap"
+        "时间段", "实际总量", "已识别", "未识别", "Clash未识别"
     );
     for row in &rows {
         let physical = row.physical_upload.saturating_add(row.physical_download);
@@ -438,14 +436,14 @@ fn gaps(paths: &AppPaths, args: QueryArgs) -> Result<()> {
         );
     }
     if rows.is_empty() {
-        println!("No fine-detail attribution buckets in this period.");
+        println!("所选时间内没有可用于比较的明细记录。");
     }
     Ok(())
 }
 
 fn doctor(paths: &AppPaths) -> Result<()> {
     let mut failures = Vec::new();
-    println!("FlowWatch diagnostics");
+    println!("FlowWatch 检查");
     let mut backend = MacOsBackend::with_poll_seconds(1);
     let process_probe = backend.process_traffic();
     let socket_owners: HashMap<_, _> = process_probe
@@ -462,22 +460,20 @@ fn doctor(paths: &AppPaths) -> Result<()> {
     match Database::open(&paths.database).and_then(|database| {
         let integrity = database.integrity_check()?;
         if integrity != "ok" {
-            bail!("integrity check returned {integrity}");
+            bail!("数据库完整性检查返回异常结果：{integrity}");
         }
         Ok((database, integrity))
     }) {
-        Ok((database, integrity)) => {
-            println!("  [ok] SQLite integrity: {integrity}");
+        Ok((database, _integrity)) => {
+            println!("  [正常] SQLite 数据库完整性");
             check_database_permissions(database.path());
             let now = Local::now().timestamp();
             let anomalies = database.direct_attribution_anomalies(now - 86_400, now + 1)?;
             if anomalies.is_empty() {
-                println!(
-                    "  [ok] Direct attribution: completed 5-minute buckets fit physical bounds"
-                );
+                println!("  [正常] 应用流量：完整的五分钟记录未超过网卡实际总量");
             } else {
                 println!(
-                    "  [warn] Direct attribution: {} completed 5-minute bucket(s) exceed physical bounds",
+                    "  [警告] 应用流量：有 {} 个完整的五分钟记录超过网卡实际总量",
                     anomalies.len()
                 );
             }
@@ -498,77 +494,77 @@ fn doctor(paths: &AppPaths) -> Result<()> {
                             && sample.identifiable_connections == 0 =>
                     {
                         println!(
-                            "  [warn] Clash controller: {} active connections, none identify an application",
+                            "  [警告] Clash 控制器：有 {} 个活跃连接，但没有识别到应用",
                             sample.active_connections
                         );
-                        println!("         Consider setting find-process-mode: strict in Mihomo.");
+                        println!("           建议在 Mihomo 中设置 find-process-mode: strict。");
                     }
                     Ok(sample) => {
                         println!(
-                            "  [ok] Clash controller: {} active, {} actor, {} app-identifiable",
+                            "  [正常] Clash 控制器：活跃 {} 个，带来源信息 {} 个，已识别应用 {} 个",
                             sample.active_connections,
                             sample.actor_connections,
                             sample.identifiable_connections
                         );
                         if sample.fallback_identifiable_connections > 0 {
                             println!(
-                                "       {} from controller, {} from local sockets",
+                                "           其中控制器提供 {} 个，本机连接匹配 {} 个",
                                 sample.metadata_identifiable_connections,
                                 sample.fallback_identifiable_connections
                             );
                         }
                     }
-                    Err(error) => println!("  [warn] Clash controller: {error}"),
+                    Err(error) => println!("  [警告] Clash 控制器：{error}"),
                 }
             } else {
-                println!("  [skip] Clash provider is disabled");
+                println!("  [跳过] Clash 数据来源未启用");
             }
         }
         Err(error) => {
-            println!("  [fail] SQLite: {error:#}");
-            failures.push("SQLite");
+            println!("  [失败] SQLite 数据库：{error:#}");
+            failures.push("SQLite 数据库");
         }
     }
 
     match backend.interface_counters() {
         Ok(counters) if !counters.is_empty() => {
-            println!("  [ok] Physical counters: {} interface(s)", counters.len())
+            println!("  [正常] 网卡计数：检测到 {} 个物理网卡", counters.len())
         }
         Ok(_) => {
-            println!("  [fail] Physical counters: no hardware interfaces");
-            failures.push("physical counters");
+            println!("  [失败] 网卡计数：没有检测到物理网卡");
+            failures.push("网卡计数");
         }
         Err(error) => {
-            println!("  [fail] Physical counters: {error:#}");
-            failures.push("physical counters");
+            println!("  [失败] 网卡计数：{error:#}");
+            failures.push("网卡计数");
         }
     }
     match process_probe {
         Ok(sample) => println!(
-            "  [ok] nettop snapshot: {} active flows, {} tracked, {} socket owner(s)",
+            "  [正常] 应用采样：活跃连接 {} 个，持续跟踪 {} 个，已匹配本机连接 {} 个",
             sample.active_flows,
             sample.tracked_flows,
             sample.socket_owners.len()
         ),
         Err(error) => {
-            println!("  [fail] nettop process sampler: {error:#}");
-            failures.push("nettop");
+            println!("  [失败] 应用采样：{error:#}");
+            failures.push("应用采样");
         }
     }
 
     if launch_agent_loaded() {
-        println!("  [ok] LaunchAgent is loaded");
+        println!("  [正常] 登录自启服务正在运行");
     } else if paths.launch_agent.exists() {
-        println!("  [warn] LaunchAgent plist exists but is not loaded");
+        println!("  [警告] 登录自启配置存在，但服务未运行");
     } else {
-        println!("  [skip] LaunchAgent is not installed");
+        println!("  [跳过] 未安装登录自启服务");
     }
 
     if failures.is_empty() {
-        println!("Diagnostics passed.");
+        println!("所有检查均通过。");
         Ok(())
     } else {
-        bail!("diagnostics failed: {}", failures.join(", "))
+        bail!("检查未通过：{}", failures.join("、"))
     }
 }
 
@@ -624,7 +620,7 @@ fn install(paths: &AppPaths, args: InstallArgs) -> Result<()> {
     if let Some(path) = args.clash_config {
         let config = read_clash_config(&path)?;
         database.set_clash_config(&config)?;
-        println!("Imported Clash controller configuration (secret redacted).");
+        println!("已导入 Clash 控制器设置；密钥内容已隐藏。");
     }
     drop(database);
 
@@ -633,10 +629,10 @@ fn install(paths: &AppPaths, args: InstallArgs) -> Result<()> {
     write_launch_agent(paths)?;
     bootout_launch_agent()?;
     bootstrap_launch_agent(&paths.launch_agent)?;
-    println!("Installed and started FlowWatch.");
-    println!("  Binary:   {}", paths.installed_binary.display());
-    println!("  Command:  {}", paths.command_binary.display());
-    println!("  Database: {}", paths.database.display());
+    println!("FlowWatch 已安装并启动。");
+    println!("  程序文件：{}", paths.installed_binary.display());
+    println!("  命令路径：{}", paths.command_binary.display());
+    println!("  数据库：{}", paths.database.display());
     Ok(())
 }
 
@@ -650,9 +646,9 @@ fn uninstall(paths: &AppPaths, purge_data: bool) -> Result<()> {
         remove_file_if_exists(&PathBuf::from(format!("{}-wal", paths.database.display())))?;
         remove_file_if_exists(&PathBuf::from(format!("{}-shm", paths.database.display())))?;
         remove_file_if_exists(&paths.lock_file)?;
-        println!("Removed FlowWatch service, binary, and traffic database.");
+        println!("已删除 FlowWatch 服务、程序文件和流量数据库。");
     } else {
-        println!("Removed FlowWatch service and binary. Traffic history was preserved.");
+        println!("已删除 FlowWatch 服务和程序文件；历史流量数据已保留。");
     }
     Ok(())
 }
@@ -663,19 +659,19 @@ fn configure(paths: &AppPaths, command: ConfigCommand) -> Result<()> {
         ConfigCommand::ImportClash { path } => {
             let config = read_clash_config(&path)?;
             database.set_clash_config(&config)?;
-            println!("Clash provider enabled (secret stored in SQLite and redacted here).");
+            println!("Clash 数据来源已启用；密钥已存入 SQLite，此处不显示内容。");
             if paths.uses_default_database {
                 restart_launch_agent()?;
             }
         }
         ConfigCommand::DisableClash => {
             let Some(mut config) = database.clash_config()? else {
-                println!("Clash provider is not configured.");
+                println!("尚未设置 Clash 数据来源。");
                 return Ok(());
             };
             config.enabled = false;
             database.set_clash_config(&config)?;
-            println!("Clash provider disabled.");
+            println!("Clash 数据来源已停用。");
             if paths.uses_default_database {
                 restart_launch_agent()?;
             }
@@ -694,7 +690,7 @@ fn configure(paths: &AppPaths, command: ConfigCommand) -> Result<()> {
                 )]))?;
             }
             println!(
-                "Application detail granularity set to {}.",
+                "应用明细已改为{}保存一次。",
                 app_granularity_label(granularity.bucket_seconds())
             );
             if paths.uses_default_database {
@@ -702,47 +698,51 @@ fn configure(paths: &AppPaths, command: ConfigCommand) -> Result<()> {
             }
         }
         ConfigCommand::Show => {
-            println!("Database: {}", paths.database.display());
+            println!("数据库：{}", paths.database.display());
             println!(
-                "poll_seconds: {}",
+                "采样间隔（秒）：{}",
                 database.setting("poll_seconds")?.as_deref().unwrap_or("3")
             );
             println!(
-                "flush_seconds: {}",
+                "数据库保存间隔（秒）：{}",
                 database
                     .setting("flush_seconds")?
                     .as_deref()
                     .unwrap_or("60")
             );
             println!(
-                "detail_days: {}",
+                "明细保留天数：{}",
                 database.setting("detail_days")?.as_deref().unwrap_or("30")
             );
             println!(
-                "daily_days: {}",
+                "每日汇总保留天数：{}",
                 database.setting("daily_days")?.as_deref().unwrap_or("365")
             );
             println!(
-                "app_granularity: {}",
-                database
-                    .setting("app_granularity")?
-                    .as_deref()
-                    .unwrap_or("5m")
+                "应用明细：{}",
+                app_granularity_label(app_bucket_seconds(&database)?)
             );
             match database.clash_config()? {
                 Some(config) => {
-                    println!("clash_enabled: {}", config.enabled);
-                    println!("clash_controller: {}", config.controller);
                     println!(
-                        "clash_secret: {}",
-                        if config.secret.is_empty() {
-                            "not set"
+                        "Clash 数据来源：{}",
+                        if config.enabled {
+                            "已启用"
                         } else {
-                            "[redacted]"
+                            "已停用"
+                        }
+                    );
+                    println!("Clash 控制器：{}", config.controller);
+                    println!(
+                        "Clash 密钥：{}",
+                        if config.secret.is_empty() {
+                            "未设置"
+                        } else {
+                            "[已隐藏]"
                         }
                     );
                 }
-                None => println!("clash_enabled: false"),
+                None => println!("Clash 数据来源：未设置"),
             }
         }
     }
@@ -811,31 +811,31 @@ fn parse_query_range(args: &QueryArgs) -> Result<Period> {
     match (&args.from, &args.to) {
         (Some(from), Some(to)) => parse_exact_range(from, to),
         (None, None) => parse_period(&args.period),
-        _ => bail!("--from and --to must be provided together"),
+        _ => bail!("--from 和 --to 必须同时提供"),
     }
 }
 
 fn validate_query_args(args: &QueryArgs) -> Result<()> {
     if !(1..=10_000).contains(&args.limit) {
-        bail!("limit must be between 1 and 10000");
+        bail!("--limit 必须在 1 到 10000 之间");
     }
     if args.from.is_some() != args.to.is_some() {
-        bail!("--from and --to must be provided together");
+        bail!("--from 和 --to 必须同时提供");
     }
     Ok(())
 }
 
 fn parse_exact_range(from: &str, to: &str) -> Result<Period> {
-    let start = parse_query_timestamp(from).with_context(|| format!("parse --from {from:?}"))?;
-    let end = parse_query_timestamp(to).with_context(|| format!("parse --to {to:?}"))?;
+    let start = parse_query_timestamp(from).with_context(|| format!("无法解析 --from {from:?}"))?;
+    let end = parse_query_timestamp(to).with_context(|| format!("无法解析 --to {to:?}"))?;
     if start >= end {
-        bail!("--from must be earlier than --to");
+        bail!("--from 必须早于 --to");
     }
     Ok(Period {
         start,
         end,
         label: format!(
-            "{} to {} (end exclusive)",
+            "{} 至 {}（不含结束时间）",
             format_timestamp_with_seconds(start),
             format_timestamp_with_seconds(end)
         ),
@@ -846,13 +846,13 @@ fn parse_exact_range(from: &str, to: &str) -> Result<Period> {
 fn parse_query_timestamp(raw: &str) -> Result<i64> {
     let value = raw.trim();
     if value.is_empty() {
-        bail!("timestamp is empty");
+        bail!("时间不能为空");
     }
     if let Ok(timestamp) = value.parse::<i64>() {
         Local
             .timestamp_opt(timestamp, 0)
             .single()
-            .context("Unix timestamp is outside the supported range")?;
+            .context("Unix 时间戳超出支持范围")?;
         return Ok(timestamp);
     }
     if let Ok(timestamp) = DateTime::parse_from_rfc3339(value) {
@@ -861,44 +861,42 @@ fn parse_query_timestamp(raw: &str) -> Result<i64> {
     let naive = ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"]
         .iter()
         .find_map(|format| NaiveDateTime::parse_from_str(value, format).ok())
-        .context("use local YYYY-MM-DD HH:MM[:SS], a Unix timestamp, or an RFC 3339 timestamp")?;
+        .context("请使用本地时间 YYYY-MM-DD HH:MM[:SS]、Unix 时间戳或 RFC 3339 时间")?;
     match Local.from_local_datetime(&naive) {
         LocalResult::Single(timestamp) => Ok(timestamp.timestamp()),
         LocalResult::Ambiguous(_, _) => {
-            bail!("local time is ambiguous due to daylight saving time")
+            bail!("该本地时间因夏令时切换而存在两个可能值，请改用 RFC 3339 时间")
         }
-        LocalResult::None => bail!("local time does not exist due to daylight saving time"),
+        LocalResult::None => bail!("该本地时间因夏令时切换而不存在，请改用 RFC 3339 时间"),
     }
 }
 
 fn parse_period_at(raw: &str, now: i64) -> Result<Period> {
     let normalized = raw.trim().to_ascii_lowercase();
     let (start, label) = match normalized.as_str() {
-        "today" => (day_bucket(now), "today".to_string()),
-        "yesterday" => {
+        "today" | "今天" => (day_bucket(now), "今天".to_string()),
+        "yesterday" | "昨天" => {
             let today = day_bucket(now);
-            (day_bucket(today - 1), "yesterday".to_string())
+            (day_bucket(today - 1), "昨天".to_string())
         }
-        "all" => (0, "all retained history".to_string()),
+        "all" | "全部" => (0, "全部已保留记录".to_string()),
         _ => {
-            let (number, multiplier) = if let Some(value) = normalized.strip_suffix('h') {
-                (value, 3_600i64)
+            let (number, multiplier, unit) = if let Some(value) = normalized.strip_suffix('h') {
+                (value, 3_600i64, "小时")
             } else if let Some(value) = normalized.strip_suffix('d') {
-                (value, 86_400i64)
+                (value, 86_400i64, "天")
             } else {
-                bail!("invalid period {raw:?}; use today, yesterday, 24h, 7d, 30d, or all");
+                bail!("无法识别时间范围 {raw:?}；请使用 today、yesterday、24h、7d、30d 或 all");
             };
-            let amount: i64 = number.parse().context("parse period amount")?;
+            let amount: i64 = number.parse().context("时间范围中的数字无效")?;
             if !(1..=3_650).contains(&amount) {
-                bail!("period amount must be between 1 and 3650");
+                bail!("时间范围中的数字必须在 1 到 3650 之间");
             }
-            let seconds = amount
-                .checked_mul(multiplier)
-                .context("period is too large")?;
-            (now.saturating_sub(seconds), normalized.clone())
+            let seconds = amount.checked_mul(multiplier).context("时间范围过大")?;
+            (now.saturating_sub(seconds), format!("最近 {amount} {unit}"))
         }
     };
-    let end = if normalized == "yesterday" {
+    let end = if normalized == "yesterday" || normalized == "昨天" {
         day_bucket(now)
     } else {
         now.saturating_add(1)
@@ -954,16 +952,16 @@ fn sort_gaps(rows: &mut [AttributionGap], sort: SortBy) {
 fn sources(row: &AppUsage) -> String {
     let mut values = Vec::new();
     if row.direct_upload > 0 || row.direct_download > 0 {
-        values.push("direct");
+        values.push("直连");
     }
     if row.clash_upload > 0 || row.clash_download > 0 {
-        values.push("clash");
+        values.push("Clash");
     }
     if row.enhanced_upload > 0 || row.enhanced_download > 0 {
-        values.push("enhanced");
+        values.push("增强模式");
     }
     if values.is_empty() {
-        "unknown".to_string()
+        "未知来源".to_string()
     } else {
         values.join("+")
     }
@@ -982,10 +980,10 @@ fn coverage(attributed: (u64, u64), total: (u64, u64)) -> String {
     let numerator = attributed.0.saturating_add(attributed.1);
     let denominator = total.0.saturating_add(total.1);
     if denominator == 0 {
-        return "coverage unavailable".to_string();
+        return "识别率暂无数据".to_string();
     }
     format!(
-        "{:.1}% coverage",
+        "识别率 {:.1}%",
         numerator as f64 * 100.0 / denominator as f64
     )
 }
@@ -994,7 +992,7 @@ fn app_bucket_seconds(database: &Database) -> Result<i64> {
     match database.setting("app_granularity")?.as_deref() {
         None | Some("5m") => Ok(300),
         Some("1m") => Ok(60),
-        Some(value) => bail!("invalid app_granularity setting {value:?}; use 1m or 5m"),
+        Some(value) => bail!("app_granularity 设置无效：{value:?}；请使用 1m 或 5m"),
     }
 }
 
@@ -1020,9 +1018,9 @@ fn gap_bucket_seconds(
 
 fn app_granularity_label(bucket_seconds: i64) -> &'static str {
     if bucket_seconds == 60 {
-        "one-minute"
+        "每分钟"
     } else {
-        "five-minute"
+        "每五分钟"
     }
 }
 
@@ -1063,11 +1061,11 @@ fn meta_timestamp(
     now: i64,
 ) -> String {
     let Some(timestamp) = meta.get(key).and_then(|value| value.parse::<i64>().ok()) else {
-        return "never".to_string();
+        return "从未保存".to_string();
     };
     let age = now.saturating_sub(timestamp).max(0) as u64;
     format!(
-        "{} ({} ago)",
+        "{}（{}前）",
         format_timestamp(timestamp),
         human_duration(age)
     )
@@ -1099,24 +1097,24 @@ fn apply_attribution_window(
 
 fn human_duration(seconds: u64) -> String {
     if seconds < 60 {
-        format!("{seconds}s")
+        format!("{seconds} 秒")
     } else if seconds < 3_600 {
-        format!("{}m", seconds / 60)
+        format!("{} 分钟", seconds / 60)
     } else if seconds < 86_400 {
-        format!("{}h", seconds / 3_600)
+        format!("{} 小时", seconds / 3_600)
     } else {
-        format!("{}d", seconds / 86_400)
+        format!("{} 天", seconds / 86_400)
     }
 }
 
 fn print_collector_errors(meta: &std::collections::BTreeMap<String, String>) {
     for (label, key) in [
-        ("Physical collector", "interface_error"),
-        ("Process collector", "process_error"),
-        ("Clash provider", "clash_error"),
+        ("网卡计数", "interface_error"),
+        ("应用采样", "process_error"),
+        ("Clash 数据来源", "clash_error"),
     ] {
         if let Some(error) = meta.get(key).filter(|error| !error.is_empty()) {
-            println!("  Warning: {label}: {error}");
+            println!("  警告：{label}：{error}");
         }
     }
 }
@@ -1130,7 +1128,7 @@ fn process_is_running(pid: i32) -> bool {
 }
 
 fn install_binary(destination: &Path, parent_mode: Option<u32>) -> Result<()> {
-    let source = std::env::current_exe().context("resolve current executable")?;
+    let source = std::env::current_exe().context("无法确定当前程序路径")?;
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent)?;
         if let Some(mode) = parent_mode {
@@ -1142,10 +1140,10 @@ fn install_binary(destination: &Path, parent_mode: Option<u32>) -> Result<()> {
     }
     let temporary = destination.with_extension(format!("new.{}", std::process::id()));
     fs::copy(&source, &temporary)
-        .with_context(|| format!("copy {} to {}", source.display(), temporary.display()))?;
+        .with_context(|| format!("无法将 {} 复制到 {}", source.display(), temporary.display()))?;
     restrict_mode(&temporary, 0o755)?;
     fs::rename(&temporary, destination)
-        .with_context(|| format!("install binary to {}", destination.display()))?;
+        .with_context(|| format!("无法将程序安装到 {}", destination.display()))?;
     Ok(())
 }
 
@@ -1163,7 +1161,7 @@ where
         (Some(value), _) => Ok(value),
         (None, Some(value)) => value
             .parse()
-            .map_err(|error| anyhow::anyhow!("invalid stored {name} setting {value:?}: {error}")),
+            .map_err(|error| anyhow::anyhow!("已保存的 {name} 设置 {value:?} 无效：{error}")),
         (None, None) => Ok(default),
     }
 }
@@ -1178,7 +1176,7 @@ fn resolve_app_granularity(
     match stored {
         None | Some("5m") => Ok(AppGranularity::FiveMinutes),
         Some("1m") => Ok(AppGranularity::OneMinute),
-        Some(value) => bail!("invalid stored app_granularity setting {value:?}; use 1m or 5m"),
+        Some(value) => bail!("已保存的 app_granularity 设置 {value:?} 无效；请使用 1m 或 5m"),
     }
 }
 
@@ -1186,7 +1184,7 @@ fn write_launch_agent(paths: &AppPaths) -> Result<()> {
     let parent = paths
         .launch_agent
         .parent()
-        .context("LaunchAgents path has no parent")?;
+        .context("LaunchAgents 路径缺少上级目录")?;
     fs::create_dir_all(parent)?;
     let mut dictionary = Dictionary::new();
     dictionary.insert("Label".into(), AGENT_LABEL.into());
@@ -1213,10 +1211,10 @@ fn write_launch_agent(paths: &AppPaths) -> Result<()> {
         .with_extension(format!("plist.new.{}", std::process::id()));
     Value::Dictionary(dictionary)
         .to_file_xml(&temporary)
-        .with_context(|| format!("write {}", temporary.display()))?;
+        .with_context(|| format!("无法写入 {}", temporary.display()))?;
     restrict_mode(&temporary, 0o600)?;
     fs::rename(&temporary, &paths.launch_agent)
-        .with_context(|| format!("install {}", paths.launch_agent.display()))?;
+        .with_context(|| format!("无法安装 {}", paths.launch_agent.display()))?;
     Ok(())
 }
 
@@ -1248,7 +1246,7 @@ fn restart_launch_agent() -> Result<()> {
         return Ok(());
     }
     run_launchctl(&["kill", "SIGTERM", &launch_service()])?;
-    println!("Restart signal sent to the installed collector.");
+    println!("已通知采集服务重启。");
     Ok(())
 }
 
@@ -1263,18 +1261,18 @@ fn bootstrap_launch_agent(path: &Path) -> Result<()> {
             Err(error) => last_error = Some(error),
         }
     }
-    let error = last_error.context("launchctl bootstrap was not attempted")?;
-    Err(error).context("load FlowWatch LaunchAgent")
+    let error = last_error.context("未尝试启动 launchctl 服务")?;
+    Err(error).context("无法启动 FlowWatch 登录自启服务")
 }
 
 fn run_launchctl(args: &[&str]) -> Result<()> {
     let output = Command::new(LAUNCHCTL)
         .args(args)
         .output()
-        .context("run launchctl")?;
+        .context("无法运行 launchctl")?;
     if !output.status.success() {
         bail!(
-            "launchctl failed: {}",
+            "launchctl 执行失败：{}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
@@ -1283,14 +1281,14 @@ fn run_launchctl(args: &[&str]) -> Result<()> {
 
 fn path_string(path: &Path) -> Result<&str> {
     path.to_str()
-        .with_context(|| format!("path is not valid UTF-8: {}", path.display()))
+        .with_context(|| format!("路径不是有效的 UTF-8：{}", path.display()))
 }
 
 fn remove_file_if_exists(path: &Path) -> Result<()> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
+        Err(error) => Err(error).with_context(|| format!("无法删除 {}", path.display())),
     }
 }
 
@@ -1307,10 +1305,25 @@ fn check_database_permissions(path: &Path) {
     if let Ok(metadata) = path.metadata() {
         let mode = metadata.permissions().mode() & 0o777;
         if mode != 0o600 {
-            println!("  [warn] Database permissions are {mode:o}; expected 600");
+            println!("  [警告] 数据库权限为 {mode:o}，应为 600");
         } else {
-            println!("  [ok] Database permissions: 600");
+            println!("  [正常] 数据库权限：600");
         }
+    }
+}
+
+fn display_app_name(name: &str) -> &str {
+    if name == UNKNOWN {
+        "未知应用"
+    } else {
+        name
+    }
+}
+
+fn collector_engine_label(engine: &str) -> &str {
+    match engine {
+        "nettop_snapshot_v3" => "nettop 定时采样",
+        _ => engine,
     }
 }
 
@@ -1324,6 +1337,12 @@ mod tests {
         let range = parse_period_at("24h", 1_000_000).unwrap();
         assert_eq!(range.start, 913_600);
         assert_eq!(range.end, 1_000_001);
+        assert_eq!(parse_period_at("今天", 1_000_000).unwrap().label, "今天");
+        assert_eq!(parse_period_at("昨天", 1_000_000).unwrap().label, "昨天");
+        assert_eq!(
+            parse_period_at("全部", 1_000_000).unwrap().label,
+            "全部已保留记录"
+        );
         assert!(parse_period_at("0d", 1_000_000).is_err());
         assert!(parse_period_at("week", 1_000_000).is_err());
     }
@@ -1378,8 +1397,8 @@ mod tests {
 
     #[test]
     fn reports_coverage_without_hiding_overcount() {
-        assert_eq!(coverage((110, 0), (100, 0)), "110.0% coverage");
-        assert_eq!(coverage((0, 0), (0, 0)), "coverage unavailable");
+        assert_eq!(coverage((110, 0), (100, 0)), "识别率 110.0%");
+        assert_eq!(coverage((0, 0), (0, 0)), "识别率暂无数据");
     }
 
     #[test]

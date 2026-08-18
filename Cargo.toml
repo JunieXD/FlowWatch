@@ -9,12 +9,12 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "MIT"
 rust-version = "1.88"
 authors = ["JunieXD"]
-description = "Lightweight, local-first per-application network accounting for macOS"
+description = "轻量、注重隐私的 macOS 应用流量统计工具"
 repository = "https://github.com/JunieXD/FlowWatch"
 homepage = "https://github.com/JunieXD/FlowWatch"
 readme = "README.md"

@@ -13,7 +13,7 @@ trap cleanup EXIT HUP INT TERM
 case "$(uname -m)" in
     arm64) TARGET="aarch64-apple-darwin" ;;
     x86_64) TARGET="x86_64-apple-darwin" ;;
-    *) echo "unsupported test architecture" >&2; exit 2 ;;
+    *) echo "不支持当前测试架构" >&2; exit 2 ;;
 esac
 
 RELEASE_DIR="${TEST_ROOT}/release"
@@ -49,12 +49,12 @@ if HOME="${TEST_ROOT}/home" \
     FLOWWATCH_DOWNLOAD_BASE="file://${RELEASE_DIR}" \
     FLOWWATCH_TEST_MARKER="$MARKER" \
     sh scripts/install.sh >/dev/null 2>&1; then
-    echo "installer accepted an archive with an invalid checksum" >&2
+    echo "安装器接受了校验和无效的归档文件" >&2
     exit 1
 fi
 if [ -e "$MARKER" ]; then
-    echo "installer executed an archive before checksum verification" >&2
+    echo "安装器在校验和验证前执行了归档文件" >&2
     exit 1
 fi
 
-echo "Installer tests passed."
+echo "安装器测试通过。"

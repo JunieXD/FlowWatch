@@ -16,11 +16,11 @@ case "${SYSTEM}:${ARCHITECTURE}" in
         TARGET="x86_64-apple-darwin"
         ;;
     Darwin:*)
-        echo "FlowWatch does not yet support macOS architecture ${ARCHITECTURE}." >&2
+        echo "FlowWatch 暂不支持 macOS 架构 ${ARCHITECTURE}。" >&2
         exit 2
         ;;
     *)
-        echo "FlowWatch 0.1 currently supports macOS only." >&2
+        echo "FlowWatch 0.1 目前仅支持 macOS。" >&2
         exit 2
         ;;
 esac
@@ -46,7 +46,7 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-echo "Downloading FlowWatch for ${TARGET}..."
+echo "正在下载适用于 ${TARGET} 的 FlowWatch..."
 curl -fsSL --retry 3 --retry-delay 1 \
     "${DOWNLOAD_BASE}/${ASSET}" -o "${TEMP_DIR}/${ASSET}"
 curl -fsSL --retry 3 --retry-delay 1 \
@@ -55,7 +55,7 @@ curl -fsSL --retry 3 --retry-delay 1 \
 CHECKSUMS_SIZE="$(wc -c < "${TEMP_DIR}/SHA256SUMS" | tr -d ' ')"
 ARCHIVE_SIZE="$(wc -c < "${TEMP_DIR}/${ASSET}" | tr -d ' ')"
 if [ "$CHECKSUMS_SIZE" -gt 1048576 ] || [ "$ARCHIVE_SIZE" -gt 67108864 ]; then
-    echo "The downloaded release exceeds FlowWatch's size limit." >&2
+    echo "下载的发布文件超过 FlowWatch 的大小限制。" >&2
     exit 2
 fi
 
@@ -69,29 +69,29 @@ EXPECTED_HASH="$(awk -v asset="$ASSET" '
 case "$EXPECTED_HASH" in
     *"
 "*)
-        echo "SHA256SUMS contains multiple entries for ${ASSET}." >&2
+        echo "SHA256SUMS 中包含多个 ${ASSET} 条目。" >&2
         exit 2
         ;;
     *[!0-9a-f]* | "")
-        echo "SHA256SUMS has no valid entry for ${ASSET}." >&2
+        echo "SHA256SUMS 中没有 ${ASSET} 的有效条目。" >&2
         exit 2
         ;;
 esac
 if [ "${#EXPECTED_HASH}" -ne 64 ]; then
-    echo "SHA256SUMS has no valid entry for ${ASSET}." >&2
+    echo "SHA256SUMS 中没有 ${ASSET} 的有效条目。" >&2
     exit 2
 fi
 
 ACTUAL_HASH="$(shasum -a 256 "${TEMP_DIR}/${ASSET}" | awk '{print tolower($1)}')"
 if [ "$ACTUAL_HASH" != "$EXPECTED_HASH" ]; then
-    echo "SHA-256 verification failed for ${ASSET}; installation stopped." >&2
+    echo "${ASSET} 的 SHA-256 校验失败，已停止安装。" >&2
     exit 2
 fi
-echo "SHA-256 verified."
+echo "SHA-256 校验通过。"
 
 tar -xzf "${TEMP_DIR}/${ASSET}" -C "$TEMP_DIR"
 if [ ! -f "${TEMP_DIR}/flowwatch" ]; then
-    echo "The release archive does not contain the flowwatch executable." >&2
+    echo "发布归档中不包含 flowwatch 程序。" >&2
     exit 2
 fi
 chmod 755 "${TEMP_DIR}/flowwatch"
@@ -100,7 +100,7 @@ chmod 755 "${TEMP_DIR}/flowwatch"
 case ":${PATH}:" in
     *":${HOME}/.local/bin:"*) ;;
     *)
-        echo "Add FlowWatch to PATH before using the short command:"
+        echo "使用 flowwatch 命令前，请将 FlowWatch 加入 PATH："
         echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
         ;;
 esac

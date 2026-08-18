@@ -4,7 +4,7 @@ use std::path::Path;
 
 pub fn read_clash_config(path: &Path) -> Result<ClashConfig> {
     let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("read Clash config {}", path.display()))?;
+        .with_context(|| format!("无法读取 Clash 配置文件 {}", path.display()))?;
     let mut controller = String::new();
     let mut secret = String::new();
     for line in raw.lines() {
@@ -21,7 +21,7 @@ pub fn read_clash_config(path: &Path) -> Result<ClashConfig> {
         }
     }
     if controller.is_empty() {
-        bail!("external-controller is missing from {}", path.display());
+        bail!("{} 中缺少 external-controller", path.display());
     }
     Ok(ClashConfig {
         enabled: true,

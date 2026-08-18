@@ -61,9 +61,9 @@ impl MacOsBackend {
         let output = Command::new(NETWORKSETUP)
             .arg("-listallhardwareports")
             .output()
-            .context("run networksetup")?;
+            .context("无法运行 networksetup")?;
         if !output.status.success() {
-            bail!("networksetup failed with {}", output.status);
+            bail!("networksetup 执行失败：{}", output.status);
         }
         let mut interfaces = HashSet::new();
         for line in String::from_utf8_lossy(&output.stdout).lines() {
@@ -75,7 +75,7 @@ impl MacOsBackend {
             }
         }
         if interfaces.is_empty() {
-            bail!("no enN hardware interfaces found");
+            bail!("没有找到 enN 物理网卡");
         }
         self.hardware_interfaces = interfaces;
         Ok(())
@@ -196,8 +196,8 @@ fn run_nettop_snapshot() -> Result<Vec<u8>> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .context("start nettop snapshot")?;
-    let mut stdout = child.stdout.take().context("capture nettop stdout")?;
+        .context("无法启动 nettop 采样")?;
+    let mut stdout = child.stdout.take().context("无法读取 nettop 输出")?;
     let reader = match std::thread::Builder::new()
         .name("flowwatch-nettop-reader".to_string())
         .spawn(move || {
@@ -208,31 +208,28 @@ fn run_nettop_snapshot() -> Result<Vec<u8>> {
         Err(error) => {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(error).context("start nettop reader thread");
+            return Err(error).context("无法启动 nettop 读取线程");
         }
     };
     let started = Instant::now();
     let status = loop {
-        if let Some(status) = child.try_wait().context("read nettop exit status")? {
+        if let Some(status) = child.try_wait().context("无法读取 nettop 退出状态")? {
             break status;
         }
         if started.elapsed() >= NETTOP_TIMEOUT {
             let _ = child.kill();
             let _ = child.wait();
             let _ = reader.join();
-            bail!(
-                "nettop snapshot exceeded {} seconds",
-                NETTOP_TIMEOUT.as_secs()
-            );
+            bail!("nettop 采样超过 {} 秒仍未完成", NETTOP_TIMEOUT.as_secs());
         }
         std::thread::sleep(Duration::from_millis(10));
     };
     let output = reader
         .join()
-        .map_err(|_| anyhow::anyhow!("nettop reader thread panicked"))?
-        .context("read nettop snapshot")?;
+        .map_err(|_| anyhow::anyhow!("nettop 读取线程异常退出"))?
+        .context("无法读取 nettop 采样结果")?;
     if !status.success() {
-        bail!("nettop snapshot failed with {status}");
+        bail!("nettop 采样失败：{status}");
     }
     Ok(output)
 }
@@ -250,7 +247,7 @@ pub fn route_interface_counters() -> Result<HashMap<String, ByteDelta>> {
     // SAFETY: raw and written are valid writable buffers for the C shim.
     let error = unsafe { flowwatch_interface_counters(raw.as_mut_ptr(), raw.len(), &mut written) };
     if error != 0 {
-        return Err(std::io::Error::from_raw_os_error(error)).context("read interface counters");
+        return Err(std::io::Error::from_raw_os_error(error)).context("无法读取网卡计数");
     }
     let mut counters = HashMap::new();
     for item in &raw[..written] {
@@ -300,7 +297,7 @@ fn parse_nettop_frame(
     let mut active_pids = HashSet::new();
 
     for record in reader.records() {
-        let record = record.context("parse nettop CSV")?;
+        let record = record.context("无法解析 nettop 数据")?;
         let label = record.get(0).unwrap_or("").trim();
         if label.is_empty() {
             columns = record

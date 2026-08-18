@@ -1,24 +1,24 @@
-name: Feature request
-description: Suggest a focused improvement to FlowWatch
-title: "[Feature]: "
+name: 功能建议
+description: 提议一项明确、集中的改进
+title: "[建议] "
 labels:
   - enhancement
 body:
   - type: textarea
     id: problem
     attributes:
-      label: Problem
-      description: What traffic-accounting or operational problem are you trying to solve?
+      label: 要解决的问题
+      description: 你想解决什么流量统计或日常使用问题？
     validations:
       required: true
   - type: textarea
     id: proposal
     attributes:
-      label: Proposed behavior
+      label: 建议的行为
     validations:
       required: true
   - type: textarea
     id: tradeoffs
     attributes:
-      label: Accuracy, permission, and resource tradeoffs
-      description: Note whether the idea needs elevated privileges, packet metadata, signing, or more storage.
+      label: 准确性、权限和资源取舍
+      description: 请说明是否需要更高权限、数据包元信息、签名或更多存储空间。

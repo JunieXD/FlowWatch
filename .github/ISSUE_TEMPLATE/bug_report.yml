@@ -1,56 +1,56 @@
-name: Bug report
-description: Report incorrect accounting, installation problems, or crashes
-title: "[Bug]: "
+name: 问题报告
+description: 报告统计错误、安装问题或程序崩溃
+title: "[问题] "
 labels:
   - bug
 body:
   - type: markdown
     attributes:
       value: |
-        Do not attach your production SQLite database, Clash configuration, controller secret, remote domains, or IP addresses.
+        请勿附上生产 SQLite 数据库、Clash 配置、控制器密钥、远端域名或 IP 地址。
   - type: input
     id: version
     attributes:
-      label: FlowWatch version
-      placeholder: "flowwatch 0.1.0"
+      label: FlowWatch 版本
+      placeholder: "flowwatch 0.1.1"
     validations:
       required: true
   - type: input
     id: macos
     attributes:
-      label: macOS version and Mac model
-      placeholder: "macOS 15.6, Apple M3"
+      label: macOS 版本和 Mac 型号
+      placeholder: "macOS 15.6，Apple M3"
     validations:
       required: true
   - type: dropdown
     id: traffic
     attributes:
-      label: Traffic path
+      label: 流量经过的路径
       options:
-        - Direct
-        - Clash/Mihomo system proxy
+        - 直连
+        - Clash/Mihomo 系统代理
         - Clash/Mihomo TUN
-        - Mixed or unknown
+        - 混合或无法确定
     validations:
       required: true
   - type: textarea
     id: description
     attributes:
-      label: What happened?
-      description: Include expected and actual behavior with approximate, non-sensitive totals.
+      label: 发生了什么？
+      description: 请提供预期和实际行为，以及不含敏感信息的大致流量数字。
     validations:
       required: true
   - type: textarea
     id: doctor
     attributes:
-      label: Redacted doctor output
-      description: Paste `flowwatch doctor`. Confirm it contains no private information before submitting.
+      label: 已隐藏敏感信息的 doctor 输出
+      description: 粘贴 `flowwatch doctor` 输出，提交前确认其中没有私人信息。
       render: shell
     validations:
       required: true
   - type: textarea
     id: reproduction
     attributes:
-      label: Reproduction steps
+      label: 复现步骤
     validations:
       required: true

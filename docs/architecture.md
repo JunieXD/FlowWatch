@@ -1,75 +1,73 @@
-# Architecture
+# 架构说明
 
-FlowWatch separates authoritative accounting from best-effort attribution. This distinction is a product invariant, not just an implementation detail.
+FlowWatch 将“网卡实际总量”和“应用识别结果”分开保存。这是产品约束，而不只是实现细节：无法确认来源的流量必须保留为未识别，不能为了让表格好看而分配给某个应用。
 
 ```text
-macOS native counters ---------> physical minute ledger -----> status/interfaces/spikes
-                                     (authoritative)
+macOS 原生网卡计数器 ------> 每分钟实际总量 ------> status / interfaces / spikes
 
-macOS nettop snapshots -------->
-                                app five-minute ledger ------> apps/coverage
-Clash/Mihomo controller ------->     (attributed)
+macOS nettop 定时采样 -----> 应用明细 ----------> apps / gaps
+Clash/Mihomo 控制器 ------->
 
-                                  SQLite daily rollups
+                              SQLite 每日汇总
 ```
 
-## Workspace Boundaries
+## 工作区边界
 
-- `flowwatch-core`: platform-neutral identities, observations, delta trackers, source confidence, and backend traits.
-- `flowwatch-store`: platform-neutral SQLite schema, aggregation, retention, permissions, and queries.
-- `flowwatch-clash`: optional cross-platform Mihomo controller provider.
-- `flowwatch-macos`: macOS interface counters, `nettop`, `libproc`, and application bundle identity.
-- `apps/flowwatch`: CLI orchestration, collector lifecycle, configuration, and LaunchAgent installation.
+- `flowwatch-core`：跨平台的应用身份、采样模型、计数增量和后端接口。
+- `flowwatch-store`：跨平台的 SQLite 表结构、汇总、保存期限、权限和查询。
+- `flowwatch-clash`：可选的跨平台 Mihomo 控制器数据来源。
+- `flowwatch-macos`：macOS 网卡计数、`nettop`、`libproc` 和应用包身份识别。
+- `apps/flowwatch`：CLI、采集服务生命周期、配置和 LaunchAgent 安装。
 
-Platform APIs must remain outside `flowwatch-core` and `flowwatch-store`. A future Windows implementation should be introduced as a sibling backend crate rather than adding conditional Windows behavior throughout shared accounting code.
+平台接口不得进入 `flowwatch-core` 或 `flowwatch-store`。未来的 Windows 支持应以并列后端 crate 实现，而不是在共享统计逻辑中散布 Windows 条件分支。
 
-## Accounting Invariants
+## 统计约束
 
-1. Physical totals come only from hardware `enN` interfaces reported by `networksetup`. Loopback, `utun`, bridge, and other virtual interfaces are excluded from the physical ledger.
-2. Interface counters are native 64-bit `IFMIB_IFDATA` values. Absolute baselines are persisted so a collector restart does not create a gap. Counter rollback is treated as an interface reset.
-3. Every poll runs one short-lived cumulative `nettop -L 1` snapshot. Direct flow IDs include PID, interface, protocol, and socket endpoints so identical multicast sockets on different interfaces cannot cross-contaminate their counters. The first observation of every flow, and the first observation after a counter reset, is baseline-only. Only later monotonic increments are attributed. Only rows on hardware `enN` interfaces enter direct attribution; `lo0` rows only populate an in-memory `(protocol, source address, source port) -> application` map with a 15-second lifetime.
-4. Direct app samples exclude known Clash/Mihomo carrier executables. Otherwise the carrier would be counted once by `nettop` and again by Clash attribution.
-5. Clash resolves an actor from controller process metadata first, then from the short-lived loopback socket map. A known connection ID keeps its resolved identity across transient lookup failures. An unresolved active connection is held for six seconds so delayed socket metadata can arrive; if it closes or the grace period expires, its bytes remain visible as unknown.
-6. Clash TUN and internal flows are excluded from app attribution. LAN clients receive explicit `[LAN]` identities. Unknown applications remain queryable but do not count toward coverage.
-7. All writes use saturating arithmetic and transactional SQLite upserts. Raw flow targets and socket endpoints are not persisted.
-8. Every completed five-minute direct bucket is compared with the physical ledger. A bucket that exceeds physical bytes by more than both 1 MiB and 10% produces a quality warning. Data is never silently clipped or scaled.
-9. Coverage may exceed 100% if a backend or operating-system source behaves unexpectedly. The CLI reports the raw ratio instead of clipping it, making accounting regressions visible.
-10. Application identity paths are canonicalized before resolution. The macOS backend recognizes the outermost `.app` or `.app.bundle` and prefers its bundle identifier. Pathless process-name aliases are accepted only while they identify one unique application; ambiguity falls back to a separate `process:` identity. Query-time consolidation applies the same conservative rule to retained history and recognizes the bundle identifier embedded in macOS code-sign-clone paths.
-11. Clash `unattributed` is the saturating difference between controller total bytes and known-application bytes. New samples additionally persist observed actor bytes, allowing the CLI to separate actor attribution coverage from non-actor/internal/unobserved traffic. Actor totals are still sampled flow deltas, so a flow that closes between polls remains unobserved. Legacy proxy rows use nullable actor columns and are never backfilled with guessed classifications. Unknown actor rows remain explicit and are never redistributed.
+1. 实际总量只来自 `networksetup` 找到的硬件 `enN` 网卡。回环、`utun`、桥接和其他虚拟网卡不进入实际总量。
+2. 网卡使用原生 64 位 `IFMIB_IFDATA` 计数。绝对值基线会保存到数据库，因此采集服务重启不会制造总量缺口；计数倒退视为网卡重置。
+3. 每次采样执行短暂的 `nettop -L 1`。直连连接 ID 包含 PID、网卡、协议和套接字端点。连接第一次出现或计数重置后只建立基线，之后的递增部分才记入应用。`lo0` 连接只用于在内存中短暂建立“本机端口到应用”的匹配表，不写入数据库。
+4. 已知的 Clash/Mihomo 进程不会计入直连应用，否则代理载体会在 `nettop` 和 Clash 两处重复统计。
+5. Clash 优先使用控制器提供的进程信息，缺失时再尝试本机回环连接匹配。连接 ID 已成功匹配后，会在短暂查询失败时保留结果。未知连接会等待六秒；仍无法识别时，其流量保持为未知。
+6. Clash 的 TUN 和内部连接不计入应用。局域网客户端显示为 `[LAN]`。未知应用可查询，但不会计入识别率。
+7. 数据库写入使用饱和算术和 SQLite 事务更新，不保存原始连接目标或端点。
+8. 每个已完成的五分钟直连应用记录都会与实际总量比较。超过实际字节且同时超过 1 MiB 和 10% 时，会产生数据警告；数据绝不会被悄悄截断或缩放。
+9. 识别率可能超过 100%，这通常意味着系统来源或后端存在异常。CLI 会显示原始比例，便于发现问题。
+10. 应用路径会规范化。macOS 后端会识别最外层 `.app` 或 `.app.bundle` 并优先使用 bundle 标识。只有路径缺失且进程名唯一时才会合并；含义不明确的同名进程保持独立。
+11. Clash 未识别流量等于控制器总量减去已识别应用流量，并额外保存“带来源信息的连接”总量。两次采样之间结束的连接可能仍无法观察到；旧版数据库记录不会用猜测值补填。
 
-## Sampling And Storage
+## 采样与存储
 
-The default collector takes one `nettop` snapshot every three seconds and flushes once per minute. Snapshot output is drained concurrently and a five-second watchdog kills a stuck child. The one-shot form avoids the high continuous NetworkStatistics cost observed with an infinite `nettop -L 0` subscription. App usage defaults to five-minute buckets and can opt into one-minute buckets; physical and proxy totals always use one-minute buckets. The two application detail tables can coexist across setting changes and roll into the same daily ledger. WAL mode and a bounded journal keep normal write amplification low.
+默认每 3 秒执行一次 `nettop` 采样，每分钟写入数据库。采样输出会并发读取，五秒未结束则终止。一次性采样避免了持续运行 `nettop -L 0` 带来的较高系统开销。
 
-Direct socket baselines and tombstones are held for 24 hours and capped at 100,000 entries. A tombstone contains its flow ID (including PID, interface, and socket endpoints), counters, state, and timestamps, but no resolved application identity. The Clash counter tracker retains closed connection IDs for 15 minutes and is capped at 50,000 entries; the connection-resolution cache has the same cap. The most recently observed entries win when a cap is reached. These structures exist only in memory and are rebuilt after restart; none of the endpoints are persisted.
+应用明细默认按五分钟保存，也可改为每分钟；网卡和 Clash 总量始终按分钟保存。两种应用精度可在设置变更前后并存，随后都汇总到每日记录。WAL 和受限大小的日志文件降低正常写入放大。
 
-After 30 days, fine-grained rows are rolled into local-calendar daily buckets. Daily rows are retained for 365 days by default. Both values are configurable at install time.
+直连连接基线和关闭连接的记录只保存在内存中，最长 24 小时，最多 100,000 项。Clash 的连接计数与已识别结果缓存最长 15 分钟，最多 50,000 项。达到上限时保留最新记录。所有端点都不会写入数据库。
 
-Named query windows and explicit `--from`/`--to` windows share one range model. The explicit start is inclusive and the end is exclusive, but aggregate buckets cannot be divided: app results include intersecting one- or five-minute detail buckets, and physical/proxy results include intersecting one-minute buckets. Rolled-up history has daily resolution. Application queries clamp their lower bound to `attribution_started_at`; a range entirely before that boundary returns no application rows.
+超过 30 天的分钟或五分钟记录会按本地日历汇总为每日记录，默认保留 365 天。两个期限都可在安装时设置。
 
-The `gaps` query joins physical and known-application ledgers by time bucket and ranks the positive physical remainder. It uses minute buckets only after the most recent switch into one-minute application detail; ranges that include legacy five-minute data use five-minute buckets. This prevents a five-minute aggregate from being presented as five invented minute values.
+命名时间范围和 `--from`、`--to` 使用同一套范围逻辑：开始时间包含在内，结束时间不包含在内。聚合记录不能被拆分，因此结果会包含与查询范围重叠的记录。应用查询会从当前应用识别算法启用的时间点开始，避免混合不兼容的历史算法结果。
 
-Secrets are intentionally not abstracted behind a platform credential store in `0.1`: the Clash secret is JSON inside the SQLite settings table. Directory and file modes provide local-user isolation, and every display path redacts the value.
+`gaps` 会按时间段比较实际总量与已识别应用流量，并按正差额排序。只有在切换到每分钟应用明细之后，才会显示每分钟的结果；包含旧五分钟记录的范围仍按五分钟显示，避免虚构分钟级数据。
 
-`history_started_at` records the beginning of the physical ledger. `attribution_started_at` separately marks the beginning of the current attribution algorithm. Status keeps the complete daily physical total visible but calculates application coverage, Clash coverage, and quality checks only over the latter window. This permits attribution-engine migrations without mixing incompatible app ledgers.
+Clash 密钥目前以 JSON 形式保存在 SQLite 设置表中。目录和文件权限仅允许当前用户访问，所有显示路径都会隐藏密钥。
 
-## Standard And Enhanced Modes
+## 标准模式与增强模式
 
-Standard mode is available now and requires no privileged helper. Its process attribution is sampled and therefore incomplete by design.
+标准模式现已可用，不需要管理员权限，其应用识别来自定时采样，因此存在固有限制。
 
-The planned enhanced macOS mode will be a separately signed Network Extension provider behind the same observation model. It must:
+未来的 macOS 增强模式将使用单独签名的 Network Extension，并沿用当前采样模型。它应当：
 
-- use an explicit user authorization and installation flow;
-- expose per-app byte deltas without changing storage/query contracts;
-- assign a distinct `enhanced` source so results remain auditable;
-- avoid merging with standard samples until duplicate-flow rules are proven;
-- communicate through a narrow, versioned IPC contract;
-- fall back to standard mode when entitlement or activation is unavailable.
+- 明确请求用户授权并提供安装流程；
+- 输出每个应用的流量增量，不改变存储和查询接口；
+- 使用独立的 `enhanced` 数据来源，确保统计过程可核查；
+- 在证明不会重复统计之前，不与标准模式的同一连接合并；
+- 通过窄而有版本的 IPC 接口通信；
+- 在缺少授权或无法激活时自动回退到标准模式。
 
-This work is deferred until full Xcode, signing identities, and the required Apple entitlement process are available. Endpoint Security alone is not treated as a network byte-accounting API.
+该模式需要完整 Xcode、签名身份和 Apple 的相关授权流程，暂未实现。Endpoint Security 不能替代应用流量计数接口。
 
-## Windows Extension Point
+## Windows 扩展点
 
-A future Windows backend can combine system interface counters with ETW or another documented per-process network source. It should implement the shared backend contract and emit the same `AppIdentity`, absolute counters, and flow observations. Administrator/driver-assisted collection, if needed, should be an enhanced provider rather than a requirement for the portable core.
+未来的 Windows 后端可以组合系统网卡计数与 ETW 或其他正式的按进程网络来源。它应实现共享后端接口，输出同样的 `AppIdentity`、绝对计数和连接采样。需要管理员权限或驱动的方案应作为可选增强模式，而不是跨平台核心的前提。
 
-The CLI installer and service manager are platform shells: LaunchAgent code stays macOS-specific, while a Windows service/task implementation can reuse the core, store, retention, queries, JSON output, and Clash provider.
+CLI 安装器和服务管理属于平台外壳：LaunchAgent 保持 macOS 专用；未来的 Windows 服务或计划任务可复用核心、存储、保存期限、查询、JSON 输出和 Clash 数据来源。

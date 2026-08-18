@@ -102,11 +102,11 @@ impl Database {
             && !parent.exists()
         {
             std::fs::create_dir_all(parent)
-                .with_context(|| format!("create {}", parent.display()))?;
+                .with_context(|| format!("无法创建 {}", parent.display()))?;
             restrict_directory(parent)?;
         }
-        let connection =
-            Connection::open(&path).with_context(|| format!("open database {}", path.display()))?;
+        let connection = Connection::open(&path)
+            .with_context(|| format!("无法打开数据库 {}", path.display()))?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "NORMAL")?;
         connection.pragma_update(None, "temp_store", "MEMORY")?;
@@ -264,7 +264,7 @@ impl Database {
 
     pub fn clash_config(&self) -> Result<Option<ClashConfig>> {
         self.setting("clash_config")?
-            .map(|raw| serde_json::from_str(&raw).context("decode Clash configuration"))
+            .map(|raw| serde_json::from_str(&raw).context("无法解析 Clash 设置"))
             .transpose()
     }
 

@@ -1,4 +1,4 @@
-name: Release
+name: 发布
 
 on:
   push:
@@ -15,14 +15,14 @@ concurrency:
 
 jobs:
   validate:
-    name: validate release metadata
+    name: 检查发布元数据
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.release.outputs.tag }}
     steps:
       - uses: actions/checkout@v5
       - id: release
-        name: Resolve release tag
+        name: 确定发布标签
         shell: bash
         run: |
           version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
@@ -54,13 +54,13 @@ jobs:
       RELEASE_TAG: ${{ needs.validate.outputs.tag }}
     steps:
       - uses: actions/checkout@v5
-      - name: Install Rust toolchain
+      - name: 安装 Rust 工具链
         run: rustup toolchain install 1.88.0 --profile minimal --target "$TARGET"
-      - name: Build
+      - name: 构建程序
         run: cargo +1.88.0 build --locked --release --target "$TARGET" --workspace
-      - name: Check binary version
+      - name: 检查程序版本
         run: scripts/check-release.sh "$RELEASE_TAG" "target/${TARGET}/release/flowwatch"
-      - name: Package artifact
+      - name: 打包发布文件
         shell: bash
         run: |
           mkdir -p dist
@@ -74,7 +74,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: publish GitHub Release
+    name: 创建 GitHub 发布
     if: startsWith(github.ref, 'refs/tags/v')
     needs:
       - validate
@@ -86,16 +86,16 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: Generate checksums
+      - name: 生成校验和
         working-directory: dist
         run: sha256sum * > SHA256SUMS
-      - name: Create GitHub Release
+      - name: 创建 GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.validate.outputs.tag }}
         run: |
           gh release create "$TAG" \
             --verify-tag \
-            --title "FlowWatch ${TAG}" \
+            --title "FlowWatch ${TAG} 发布" \
             --notes-file "docs/releases/${TAG}.md" \
             dist/*

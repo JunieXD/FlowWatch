@@ -39,16 +39,16 @@ impl RuntimeSettings {
 
     pub fn validate(&self) -> Result<()> {
         if !(1..=60).contains(&self.poll_seconds) {
-            bail!("poll_seconds must be between 1 and 60");
+            bail!("poll_seconds 必须在 1 到 60 之间");
         }
         if self.flush_seconds < self.poll_seconds || self.flush_seconds > 600 {
-            bail!("flush_seconds must be between poll_seconds and 600");
+            bail!("flush_seconds 必须不小于 poll_seconds，且不大于 600");
         }
         if self.detail_days < 1 || self.daily_days < self.detail_days {
-            bail!("retention must satisfy 1 <= detail_days <= daily_days");
+            bail!("保留天数必须满足 1 <= detail_days <= daily_days");
         }
         if !matches!(self.app_bucket_seconds, 60 | 300) {
-            bail!("app granularity must be 1m or 5m");
+            bail!("应用明细粒度必须为 1m 或 5m");
         }
         Ok(())
     }
@@ -460,11 +460,11 @@ pub fn acquire_lock(path: &Path) -> Result<File> {
         .read(true)
         .write(true)
         .open(path)
-        .with_context(|| format!("open collector lock {}", path.display()))?;
+        .with_context(|| format!("无法打开采集服务锁文件 {}", path.display()))?;
     // SAFETY: flock operates on the valid descriptor owned by file.
     let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
     if result != 0 {
-        bail!("collector is already running");
+        bail!("采集服务已经在运行");
     }
     Ok(file)
 }
@@ -476,11 +476,7 @@ where
 {
     database
         .setting(key)?
-        .map(|value| {
-            value
-                .parse()
-                .with_context(|| format!("parse setting {key}"))
-        })
+        .map(|value| value.parse().with_context(|| format!("无法解析设置 {key}")))
         .transpose()
         .map(|value| value.unwrap_or(default))
 }
@@ -489,7 +485,7 @@ fn parse_app_bucket_seconds(database: &Database) -> Result<i64> {
     match database.setting("app_granularity")?.as_deref() {
         None | Some("5m") => Ok(300),
         Some("1m") => Ok(60),
-        Some(value) => bail!("invalid app_granularity setting {value:?}; use 1m or 5m"),
+        Some(value) => bail!("app_granularity 设置无效：{value:?}；请使用 1m 或 5m"),
     }
 }
 

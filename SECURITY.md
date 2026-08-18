@@ -1,25 +1,25 @@
-# Security
+# 安全说明
 
-FlowWatch processes local network accounting metadata and may store a Clash/Mihomo controller secret.
+FlowWatch 会处理本机流量统计信息，并且在启用 Clash/Mihomo 时可能保存控制器密钥。
 
-## Supported Versions
+## 支持的版本
 
-Only the latest published release receives security fixes during the `0.1.x` series.
+`0.1.x` 系列仅为最新发布版本提供安全修复。
 
-## Reporting A Vulnerability
+## 报告安全问题
 
-Use [GitHub's private vulnerability reporting](https://github.com/JunieXD/FlowWatch/security/advisories/new). Do not open a public issue for a vulnerability and do not attach a production database or Clash configuration. Provide a minimal reproduction with synthetic credentials and data.
+请使用 [GitHub 私密安全报告](https://github.com/JunieXD/FlowWatch/security/advisories/new)。不要为安全问题创建公开 Issue，也不要提交生产数据库或 Clash 配置。请使用虚构的密钥和数据提供最小复现步骤。
 
-## Current Security Model
+## 当前安全设计
 
-- Controllers are restricted to local HTTP addresses in `0.1`.
-- The Clash secret is stored as plain text in SQLite by design.
-- App-created data directories use mode `0700`; database and LaunchAgent files use mode `0600`.
-- Secrets are redacted from normal CLI output.
-- Raw packets, remote domains, remote IPs, and raw controller responses are not persisted.
-- LaunchAgent stdout and stderr go to `/dev/null`; operational health is stored as bounded metadata in SQLite.
-- The release installer verifies the selected archive against the release `SHA256SUMS` file before executing it.
+- 当前仅接受监听在本机地址的 HTTP 控制器。
+- Clash 密钥按当前设计以明文保存在 SQLite 中。
+- 程序创建的数据目录权限为 `0700`；数据库和 LaunchAgent 文件权限为 `0600`。
+- 普通 CLI 输出会隐藏密钥内容。
+- 不持久化原始数据包、远端域名、远端 IP 和原始控制器响应。
+- LaunchAgent 的标准输出和错误输出写入 `/dev/null`；运行状态以容量受限的元数据保存在 SQLite 中。
+- 安装器会在执行下载的程序前，根据发布页的 `SHA256SUMS` 校验归档文件。
 
-These controls do not protect secrets from a process already running as the same macOS user. Users who require credential-store protection should not configure the Clash provider until a keychain integration is available.
+这些措施不能防止已以同一 macOS 用户身份运行的进程读取密钥。需要系统钥匙串保护的用户，在项目提供钥匙串集成前不应启用 Clash 数据来源。
 
-FlowWatch `0.1.x` is distributed without Apple code signing or notarization. Release checksums detect transfer corruption and mismatched assets, but they are hosted with the release and are not a substitute for a separately trusted signature. Users who require signed and notarized software should build from reviewed source or wait for a future signed distribution.
+FlowWatch `0.1.x` 不包含 Apple 代码签名或公证。发布校验和可发现下载损坏或架构不匹配，但校验和与发布文件托管在同一位置，不能替代独立可信的签名。需要签名和公证软件的用户应从已审阅源代码自行构建，或等待未来的已签名版本。
