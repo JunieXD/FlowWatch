@@ -49,6 +49,16 @@ flowwatch gaps --period 24h --limit 20
 
 应用排行会同时显示所选范围的实际流量、找到对应应用的流量、未找到对应应用的流量和应用识别率。这样即使应用识别不完整，也不会把排行榜误解为整台 Mac 的全部流量。需要供脚本处理时可增加 `--json`；输出包含 `range`、`summary` 和 `apps`，字段名保持英文。
 
+查看单个应用的详情或趋势：
+
+```sh
+flowwatch app "ChatGPT" --period 7d
+flowwatch chart --app "ChatGPT" --period 24h
+flowwatch apps --period 24h --details
+```
+
+应用可以使用显示名称或完整应用 ID。名称匹配到多个程序时，FlowWatch 会列出候选项并要求使用完整 ID，不会猜测用户想查看哪一个。应用趋势只包含已经找到对应应用的流量，因此可能低于该应用的实际使用量。
+
 ### 查看流量趋势
 
 ```sh
@@ -109,6 +119,7 @@ Clash 并非必需。不开系统代理、不使用 Clash 时，标准模式仍�
 | `flowwatch chart` | 在终端绘制上传、下载和合计流量趋势图。 |
 | `flowwatch explain` | 分析指定或最高流量时段的主要应用和未识别流量。 |
 | `flowwatch apps` | 按上传、下载或总量查看应用排行。 |
+| `flowwatch app` | 查看单个应用的流量、身份、路径和最高时段。 |
 | `flowwatch interfaces` | 查看各物理网卡的实际流量。 |
 | `flowwatch spikes` | 查看流量最高的分钟。 |
 | `flowwatch gaps` | 查看未识别流量较高的时间段。 |

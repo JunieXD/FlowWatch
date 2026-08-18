@@ -15,12 +15,14 @@ const ROOT_AFTER_HELP: &str = "\
   flowwatch doctor               检查采集是否正常
   flowwatch status               查看今天的流量概况
   flowwatch apps                 查看今天的应用流量排行
+  flowwatch app \"ChatGPT\"        查看某个应用的详细用量
   flowwatch chart --period 24h   查看过去 24 小时的流量趋势
 
 常见查询：
   flowwatch chart --period 6h
   flowwatch chart --date 2026-08-18
   flowwatch apps --period 24h --sort download --limit 10
+  flowwatch apps --period 24h --details
   flowwatch apps --from \"2026-08-18 09:00\" --to \"2026-08-18 18:00\"
   flowwatch spikes --period 7d
   flowwatch gaps --period 24h
@@ -50,6 +52,7 @@ const CHART_AFTER_HELP: &str = "\
 
 示例：
   flowwatch chart --period 6h
+  flowwatch chart --app \"ChatGPT\" --period 24h
   flowwatch chart --period 24h
   flowwatch chart --date 2026-08-18
   flowwatch chart --from \"2026-08-18 09:00\" --to \"2026-08-18 18:00\"
@@ -58,6 +61,17 @@ const CHART_AFTER_HELP: &str = "\
 时间范围：
   --date 用于查看某个自然日；--from 和 --to 用于任意起止时间。
   --period、--date 和 --from/--to 三种写法不能同时使用。";
+const APP_AFTER_HELP: &str = "\
+说明：
+  应用可以使用显示名称或完整应用 ID。名称匹配到多个应用时会列出候选项。
+
+示例：
+  flowwatch app \"ChatGPT\" --period 24h
+  flowwatch app \"bundle:com.openai.codex\" --period 7d
+  flowwatch chart --app \"ChatGPT\" --period 24h
+
+时间范围：
+  --date 用于查看某个自然日；--from 和 --to 用于任意起止时间。";
 const EXPLAIN_AFTER_HELP: &str = "\
 说明：
   使用 --at 可直接分析某一分钟；程序会自动采用当时的应用明细精度。
@@ -77,6 +91,7 @@ const APPS_AFTER_HELP: &str = "\
   flowwatch apps --period 昨天
   flowwatch apps --date 2026-08-18
   flowwatch apps --period 24h --sort download --limit 10
+  flowwatch apps --period 24h --details
   flowwatch apps --from \"2026-08-18 09:00\" --to \"2026-08-18 18:00\"
 
 自定义时间说明：
@@ -418,6 +433,7 @@ mod tests {
         let help = error.to_string();
         assert!(help.contains("flowwatch chart --date 2026-08-18"));
         assert!(help.contains("--interval <间隔>"));
+        assert!(help.contains("--app <应用>"));
         assert!(help.contains("--no-color"));
     }
 
@@ -451,6 +467,21 @@ mod tests {
         assert!(help.contains("flowwatch explain --at \"2026-08-18 18:37\""));
         assert!(help.contains("主要应用和未识别流量"));
     }
+
+    #[test]
+    fn app_help_explains_selectors_details_and_trends() {
+        let error = localized_command()
+            .try_get_matches_from(["flowwatch", "help", "app"])
+            .unwrap_err();
+        let help = error.to_string();
+        assert!(help.contains("用法：flowwatch app [选项] <应用>"));
+        assert!(help.contains("flowwatch chart --app \"ChatGPT\""));
+
+        let error = localized_command()
+            .try_get_matches_from(["flowwatch", "help", "apps"])
+            .unwrap_err();
+        assert!(error.to_string().contains("--details"));
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -469,7 +500,10 @@ pub enum Command {
     Explain(ExplainArgs),
     /// 按上传、下载或总量查看应用排行。
     #[command(after_help = APPS_AFTER_HELP)]
-    Apps(QueryArgs),
+    Apps(AppsArgs),
+    /// 查看单个应用的用量、身份、来源和最高流量时段。
+    #[command(after_help = APP_AFTER_HELP)]
+    App(AppArgs),
     /// 查看物理网卡的实际流量总量。
     #[command(after_help = INTERFACES_AFTER_HELP)]
     Interfaces(QueryArgs),
@@ -576,6 +610,30 @@ pub struct QueryArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+pub struct AppsArgs {
+    #[command(flatten)]
+    pub query: QueryArgs,
+
+    /// 显示应用 ID、可执行路径、连接数量和出现时间。
+    #[arg(long, help_heading = "选项")]
+    pub details: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct AppArgs {
+    /// 应用显示名称、完整应用 ID 或无歧义的名称片段。
+    #[arg(value_name = "应用", help_heading = "参数")]
+    pub selector: String,
+
+    #[command(flatten)]
+    pub range: TimeRangeArgs,
+
+    /// 输出 JSON，字段名保持英文。
+    #[arg(long, help_heading = "选项")]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
 pub struct ExplainArgs {
     #[command(flatten)]
     pub range: TimeRangeArgs,
@@ -609,6 +667,10 @@ pub struct ExplainArgs {
 pub struct ChartArgs {
     #[command(flatten)]
     pub range: TimeRangeArgs,
+
+    /// 只绘制指定应用已识别到的流量；可使用显示名称或完整应用 ID。
+    #[arg(long, value_name = "应用", help_heading = "选项")]
+    pub app: Option<String>,
 
     /// 每个点代表的时间；默认自动。可用 1m、5m、10m、15m、30m、1h、3h、6h、12h、1d、7d、30d、90d 或 365d。
     #[arg(

@@ -29,6 +29,7 @@ pub struct AppUsage {
     pub enhanced_upload: u64,
     pub enhanced_download: u64,
     pub connections: u64,
+    pub first_seen: i64,
     pub last_seen: i64,
     pub identity_count: u32,
     pub identity_ids: Vec<String>,
@@ -408,37 +409,22 @@ impl Database {
     }
 
     pub fn query_apps(&self, start: i64, end: i64) -> Result<Vec<AppUsage>> {
-        let one_minute_start = if self.setting("app_granularity")?.as_deref() == Some("1m") {
-            self.connection
-                .query_row(
-                    "SELECT value FROM meta WHERE key='app_one_minute_started_at'",
-                    [],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()?
-                .and_then(|value| value.parse::<i64>().ok())
-        } else {
-            None
-        };
-        let (five_minute_start, five_minute_end) = match one_minute_start {
-            Some(transition) if start >= transition => (end, end),
-            Some(transition) => (five_minute_bucket(start), end.min(transition)),
-            None => (five_minute_bucket(start), end),
-        };
+        let (five_minute_start, five_minute_end) = self.app_five_minute_range(start, end)?;
         let mut statement = self.connection.prepare(
             "SELECT app_id, app_name, executable_path, source,
-                    SUM(upload), SUM(download), SUM(connections), MAX(last_seen)
+                    SUM(upload), SUM(download), SUM(connections),
+                    MIN(first_seen), MAX(last_seen)
              FROM (
                 SELECT app_id, app_name, executable_path, source,
-                       upload, download, connections, last_seen
+                       upload, download, connections, first_seen, last_seen
                 FROM app_usage_1m WHERE bucket >= ?1 AND bucket < ?2
                 UNION ALL
                 SELECT app_id, app_name, executable_path, source,
-                       upload, download, connections, last_seen
+                       upload, download, connections, first_seen, last_seen
                 FROM app_usage_5m WHERE bucket >= ?3 AND bucket < ?4
                 UNION ALL
                 SELECT app_id, app_name, executable_path, source,
-                       upload, download, connections, last_seen
+                       upload, download, connections, first_seen, last_seen
                 FROM app_usage_daily WHERE bucket >= ?5 AND bucket < ?2
              )
              GROUP BY app_id, app_name, executable_path, source",
@@ -461,12 +447,14 @@ impl Database {
                     db_u64(row.get::<_, i64>(5)?),
                     db_u64(row.get::<_, i64>(6)?),
                     row.get::<_, i64>(7)?,
+                    row.get::<_, i64>(8)?,
                 ))
             },
         )?;
         let mut by_app: HashMap<String, AppUsage> = HashMap::new();
         for row in rows {
-            let (id, name, path, source, upload, download, connections, last_seen) = row?;
+            let (id, name, path, source, upload, download, connections, first_seen, last_seen) =
+                row?;
             let identity = AppIdentity {
                 id: id.clone(),
                 name,
@@ -492,9 +480,82 @@ impl Database {
                 }
             }
             usage.connections = usage.connections.saturating_add(connections);
+            merge_first_seen(&mut usage.first_seen, first_seen);
             usage.last_seen = usage.last_seen.max(last_seen);
         }
         Ok(consolidate_app_usages(by_app.into_values()))
+    }
+
+    pub fn query_app_samples(
+        &self,
+        start: i64,
+        end: i64,
+        app_ids: &[String],
+    ) -> Result<Vec<TrafficSample>> {
+        if app_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (five_minute_start, five_minute_end) = self.app_five_minute_range(start, end)?;
+        let placeholders = (0..app_ids.len())
+            .map(|index| format!("?{}", index + 6))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT bucket, SUM(upload), SUM(download), interval_seconds
+             FROM (
+                SELECT bucket, upload, download, 60 AS interval_seconds
+                FROM app_usage_1m
+                WHERE bucket >= ?1 AND bucket < ?2 AND app_id IN ({placeholders})
+                UNION ALL
+                SELECT bucket, upload, download, 300 AS interval_seconds
+                FROM app_usage_5m
+                WHERE bucket >= ?3 AND bucket < ?4 AND app_id IN ({placeholders})
+                UNION ALL
+                SELECT bucket, upload, download, 86400 AS interval_seconds
+                FROM app_usage_daily
+                WHERE bucket >= ?5 AND bucket < ?2 AND app_id IN ({placeholders})
+             )
+             GROUP BY bucket, interval_seconds
+             ORDER BY bucket"
+        );
+        let mut values = vec![
+            rusqlite::types::Value::Integer(minute_bucket(start)),
+            rusqlite::types::Value::Integer(end),
+            rusqlite::types::Value::Integer(five_minute_start),
+            rusqlite::types::Value::Integer(five_minute_end),
+            rusqlite::types::Value::Integer(day_bucket(start)),
+        ];
+        values.extend(app_ids.iter().cloned().map(rusqlite::types::Value::Text));
+        let mut statement = self.connection.prepare(&sql)?;
+        let rows = statement.query_map(rusqlite::params_from_iter(values), |row| {
+            Ok(TrafficSample {
+                bucket: row.get(0)?,
+                upload: db_u64(row.get(1)?),
+                download: db_u64(row.get(2)?),
+                interval_seconds: row.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    fn app_five_minute_range(&self, start: i64, end: i64) -> Result<(i64, i64)> {
+        let one_minute_start = if self.setting("app_granularity")?.as_deref() == Some("1m") {
+            self.connection
+                .query_row(
+                    "SELECT value FROM meta WHERE key='app_one_minute_started_at'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .and_then(|value| value.parse::<i64>().ok())
+        } else {
+            None
+        };
+        Ok(match one_minute_start {
+            Some(transition) if start >= transition => (end, end),
+            Some(transition) => (five_minute_bucket(start), end.min(transition)),
+            None => (five_minute_bucket(start), end),
+        })
     }
 
     pub fn group_apps_for_display(rows: Vec<AppUsage>) -> Vec<AppUsage> {
@@ -1170,7 +1231,14 @@ fn merge_app_usage(target: &mut AppUsage, source: AppUsage) {
         .enhanced_download
         .saturating_add(source.enhanced_download);
     target.connections = target.connections.saturating_add(source.connections);
+    merge_first_seen(&mut target.first_seen, source.first_seen);
     target.last_seen = target.last_seen.max(source.last_seen);
+}
+
+fn merge_first_seen(target: &mut i64, candidate: i64) {
+    if *target == 0 || (candidate > 0 && candidate < *target) {
+        *target = candidate;
+    }
 }
 
 fn record_app_identity(usage: &mut AppUsage, identity: &AppIdentity) {
@@ -1334,6 +1402,14 @@ mod tests {
         assert_eq!(apps.len(), 1);
         assert_eq!(apps[0].upload(), 130);
         assert_eq!(apps[0].download(), 240);
+        assert_eq!(apps[0].first_seen, now);
+        assert_eq!(apps[0].last_seen, now);
+        let app_samples = database
+            .query_app_samples(now - 60, now + 60, &["bundle:example".to_string()])
+            .unwrap();
+        assert_eq!(app_samples.len(), 1);
+        assert_eq!((app_samples[0].upload, app_samples[0].download), (130, 240));
+        assert_eq!(app_samples[0].interval_seconds, 300);
         let interfaces = database.query_interfaces(now - 60, now + 60).unwrap();
         assert_eq!(interfaces[0].upload, 180);
         let samples = database.query_traffic_samples(now - 60, now + 60).unwrap();

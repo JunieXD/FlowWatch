@@ -1,8 +1,8 @@
 use crate::chart as terminal_chart;
 use crate::clash_config::read_clash_config;
 use crate::cli::{
-    AppGranularity, ChartArgs, Cli, Command as CliCommand, ConfigCommand, ExplainArgs, InstallArgs,
-    QueryArgs, SortBy, TimeRangeArgs,
+    AppArgs, AppGranularity, AppsArgs, ChartArgs, Cli, Command as CliCommand, ConfigCommand,
+    ExplainArgs, InstallArgs, QueryArgs, SortBy, TimeRangeArgs,
 };
 use crate::collector::{Collector, RuntimeSettings, acquire_lock};
 use crate::paths::{AGENT_LABEL, AppPaths};
@@ -12,7 +12,8 @@ use flowwatch_clash::ClashSampler;
 use flowwatch_core::{AppIdentity, TrafficBackend, UNKNOWN};
 use flowwatch_macos::MacOsBackend;
 use flowwatch_store::{
-    AppUsage, AttributionGap, Database, InterfaceUsage, SpikeUsage, day_bucket, minute_bucket,
+    AppUsage, AttributionGap, Database, InterfaceUsage, SpikeUsage, TrafficSample, day_bucket,
+    minute_bucket,
 };
 use plist::{Dictionary, Value};
 use serde::Serialize;
@@ -37,6 +38,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         CliCommand::Chart(args) => chart(&paths, args),
         CliCommand::Explain(args) => explain(&paths, args),
         CliCommand::Apps(args) => apps(&paths, args),
+        CliCommand::App(args) => app(&paths, args),
         CliCommand::Interfaces(args) => interfaces(&paths, args),
         CliCommand::Spikes(args) => spikes(&paths, args),
         CliCommand::Gaps(args) => gaps(&paths, args),
@@ -51,10 +53,42 @@ fn chart(paths: &AppPaths, args: ChartArgs) -> Result<()> {
     validate_time_range(&args.range)?;
     let range = parse_time_range(&args.range)?;
     let database = Database::open(&paths.database)?;
-    let samples = database.query_traffic_samples(range.start, range.end)?;
+    let selected_app = if let Some(selector) = &args.app {
+        let meta = database.meta()?;
+        let start = attribution_window_start(&meta, range.start);
+        let rows = if start < range.end {
+            database.query_apps(start, range.end)?
+        } else {
+            Vec::new()
+        };
+        Some(select_app(
+            &Database::group_apps_for_display(rows),
+            selector,
+        )?)
+    } else {
+        None
+    };
+    let samples = match &selected_app {
+        Some(app) => database.query_app_samples(range.start, range.end, &app.identity_ids)?,
+        None => database.query_traffic_samples(range.start, range.end)?,
+    };
     if samples.is_empty() {
-        println!("流量趋势（{}）", range.label);
-        println!("所选时间内没有网卡流量记录。");
+        match &selected_app {
+            Some(app) => println!(
+                "应用流量趋势（{}；{}）",
+                display_app_name(&app.app.name),
+                range.label
+            ),
+            None => println!("流量趋势（{}）", range.label),
+        }
+        println!(
+            "所选时间内没有{}流量记录。",
+            if selected_app.is_some() {
+                "该应用的"
+            } else {
+                "网卡"
+            }
+        );
         println!("可运行 flowwatch status 确认采集服务和数据更新时间。");
         return Ok(());
     }
@@ -72,7 +106,14 @@ fn chart(paths: &AppPaths, args: ChartArgs) -> Result<()> {
         !args.no_color && std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal();
     let interval = terminal_chart::interval_label(chart.interval_seconds);
 
-    println!("流量趋势（{}）", range.label);
+    match &selected_app {
+        Some(app) => println!(
+            "应用流量趋势（{}；{}）",
+            display_app_name(&app.app.name),
+            range.label
+        ),
+        None => println!("流量趋势（{}）", range.label),
+    }
     println!("纵轴：每 {interval}的用量；横轴：时间");
     if chart.adjusted_for_daily_data {
         println!("说明：所选范围含每日汇总，间隔已自动调整为每 {interval}一个点。");
@@ -117,6 +158,9 @@ fn chart(paths: &AppPaths, args: ChartArgs) -> Result<()> {
     }
     if range.exact {
         println!("说明：统计按保存间隔聚合，边界与记录相交时会包含完整记录。");
+    }
+    if selected_app.is_some() {
+        println!("说明：这里只显示已找到对应应用的流量，可能低于该应用的实际使用量。");
     }
     Ok(())
 }
@@ -510,7 +554,9 @@ fn status(paths: &AppPaths) -> Result<()> {
     Ok(())
 }
 
-fn apps(paths: &AppPaths, args: QueryArgs) -> Result<()> {
+fn apps(paths: &AppPaths, args: AppsArgs) -> Result<()> {
+    let details = args.details;
+    let args = args.query;
     validate_query_args(&args)?;
     let database = Database::open(&paths.database)?;
     let mut range = parse_query_range(&args)?;
@@ -585,6 +631,19 @@ fn apps(paths: &AppPaths, args: QueryArgs) -> Result<()> {
             identity_summary,
             sources(row),
         );
+        if details {
+            println!("     应用 ID：{}", row.app.id);
+            println!("     连接数量：{}", row.connections);
+            if row.first_seen > 0 {
+                println!("     首次出现：{}", format_timestamp(row.first_seen));
+            }
+            if row.last_seen > 0 {
+                println!("     最后出现：{}", format_timestamp(row.last_seen));
+            }
+            for path in &row.executable_paths {
+                println!("     路径：{path}");
+            }
+        }
     }
     if rows.is_empty() {
         println!("所选时间内没有应用流量记录。");
@@ -593,6 +652,127 @@ fn apps(paths: &AppPaths, args: QueryArgs) -> Result<()> {
     println!();
     print_app_coverage(&summary);
     Ok(())
+}
+
+fn app(paths: &AppPaths, args: AppArgs) -> Result<()> {
+    validate_time_range(&args.range)?;
+    let mut range = parse_time_range(&args.range)?;
+    let database = Database::open(&paths.database)?;
+    let meta = database.meta()?;
+    if !apply_attribution_window(&mut range, &meta) {
+        bail!("所选时间内没有当前版本可用的应用流量记录");
+    }
+    let rows = Database::group_apps_for_display(database.query_apps(range.start, range.end)?);
+    let selected = select_app(&rows, &args.selector)?;
+    let samples = database.query_app_samples(range.start, range.end, &selected.identity_ids)?;
+    let peak = samples
+        .iter()
+        .max_by_key(|sample| sample.upload.saturating_add(sample.download));
+
+    if args.json {
+        let output = AppDetailOutput {
+            range: RangeOutput::from(&range),
+            app: AppOutput::from(&selected),
+            peak: peak.map(AppPeakOutput::from),
+        };
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
+    println!(
+        "应用详情（{}；{}）",
+        display_app_name(&selected.app.name),
+        range.label
+    );
+    println!(
+        "  流量：上传 {}  下载 {}  合计 {}",
+        human_bytes(selected.upload()),
+        human_bytes(selected.download()),
+        human_bytes(selected.upload().saturating_add(selected.download())),
+    );
+    println!("  来源：{}", sources(&selected));
+    println!("  连接数量：{}", selected.connections);
+    if selected.first_seen > 0 {
+        println!("  首次出现：{}", format_timestamp(selected.first_seen));
+    }
+    if selected.last_seen > 0 {
+        println!("  最后出现：{}", format_timestamp(selected.last_seen));
+    }
+    if let Some(peak) = peak {
+        println!(
+            "  最高时段：{} 起的{}，合计 {}",
+            format_timestamp(peak.bucket),
+            bucket_label(peak.interval_seconds),
+            human_bytes(peak.upload.saturating_add(peak.download)),
+        );
+    }
+    println!("  应用 ID：{}", selected.app.id);
+    if selected.identity_ids.len() > 1 {
+        println!("  合并的底层身份：");
+        for id in &selected.identity_ids {
+            println!("    {id}");
+        }
+    }
+    if !selected.executable_paths.is_empty() {
+        println!("  可执行路径：");
+        for path in &selected.executable_paths {
+            println!("    {path}");
+        }
+    }
+    println!();
+    println!(
+        "查看趋势：flowwatch chart --app \"{}\" --from \"{}\" --to \"{}\"",
+        selected.app.id,
+        format_timestamp(range.start),
+        format_timestamp(range.end),
+    );
+    println!("说明：应用流量来自定时识别，短连接可能只计入网卡实际总量。");
+    Ok(())
+}
+
+fn select_app(rows: &[AppUsage], selector: &str) -> Result<AppUsage> {
+    let selector = selector.trim();
+    if selector.is_empty() {
+        bail!("应用名称或 ID 不能为空");
+    }
+    let normalized = selector.to_lowercase();
+    let exact: Vec<_> = rows
+        .iter()
+        .filter(|row| {
+            row.app.id == selector
+                || row.identity_ids.iter().any(|id| id == selector)
+                || row.app.name.to_lowercase() == normalized
+        })
+        .collect();
+    let matches = if exact.is_empty() {
+        rows.iter()
+            .filter(|row| {
+                row.app.name.to_lowercase().contains(&normalized)
+                    || row.app.id.to_lowercase().contains(&normalized)
+                    || row
+                        .executable_paths
+                        .iter()
+                        .any(|path| path.to_lowercase().contains(&normalized))
+            })
+            .collect::<Vec<_>>()
+    } else {
+        exact
+    };
+    match matches.as_slice() {
+        [row] => Ok((*row).clone()),
+        [] => {
+            bail!("没有找到应用“{selector}”；请运行 flowwatch apps --details 查看可用名称和应用 ID")
+        }
+        rows => {
+            let candidates = rows
+                .iter()
+                .take(8)
+                .map(|row| format!("{}（{}）", display_app_name(&row.app.name), row.app.id))
+                .collect::<Vec<_>>()
+                .join("、");
+            bail!("应用“{selector}”匹配到多个结果：{candidates}；请改用完整应用 ID")
+        }
+    }
 }
 
 fn interfaces(paths: &AppPaths, args: QueryArgs) -> Result<()> {
@@ -1078,6 +1258,34 @@ struct ExplainOutput<'a> {
     apps: Vec<AppOutput<'a>>,
 }
 
+#[derive(Serialize)]
+struct AppDetailOutput<'a> {
+    range: RangeOutput<'a>,
+    app: AppOutput<'a>,
+    peak: Option<AppPeakOutput>,
+}
+
+#[derive(Serialize)]
+struct AppPeakOutput {
+    bucket: i64,
+    interval_seconds: i64,
+    upload: u64,
+    download: u64,
+    total: u64,
+}
+
+impl From<&TrafficSample> for AppPeakOutput {
+    fn from(value: &TrafficSample) -> Self {
+        Self {
+            bucket: value.bucket,
+            interval_seconds: value.interval_seconds,
+            upload: value.upload,
+            download: value.download,
+            total: value.upload.saturating_add(value.download),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize)]
 struct WindowComparison {
     previous_percent: Option<f64>,
@@ -1222,6 +1430,7 @@ struct AppOutput<'a> {
     enhanced_upload: u64,
     enhanced_download: u64,
     connections: u64,
+    first_seen: i64,
     last_seen: i64,
 }
 
@@ -1246,6 +1455,7 @@ impl<'a> From<&'a AppUsage> for AppOutput<'a> {
             enhanced_upload: value.enhanced_upload,
             enhanced_download: value.enhanced_download,
             connections: value.connections,
+            first_seen: value.first_seen,
             last_seen: value.last_seen,
         }
     }
@@ -1983,6 +2193,37 @@ mod tests {
         assert_eq!(summary.coverage_percent, None);
         assert_eq!(summary.unidentified_total, 0);
         assert!(!summary.overcount);
+    }
+
+    #[test]
+    fn app_selector_prefers_exact_matches_and_rejects_ambiguous_fragments() {
+        let rows = vec![
+            AppUsage {
+                app: AppIdentity::process("ChatGPT", "/Applications/ChatGPT.app/ChatGPT"),
+                identity_ids: vec!["bundle:com.openai.chat".into()],
+                ..AppUsage::default()
+            },
+            AppUsage {
+                app: AppIdentity::process("ChatWork", "/Applications/ChatWork.app/ChatWork"),
+                identity_ids: vec!["bundle:com.example.chatwork".into()],
+                ..AppUsage::default()
+            },
+        ];
+        assert_eq!(select_app(&rows, "ChatGPT").unwrap().app.name, "ChatGPT");
+        assert_eq!(
+            select_app(&rows, "bundle:com.openai.chat")
+                .unwrap()
+                .app
+                .name,
+            "ChatGPT"
+        );
+        assert!(
+            select_app(&rows, "chat")
+                .unwrap_err()
+                .to_string()
+                .contains("多个结果")
+        );
+        assert!(select_app(&rows, "missing").is_err());
     }
 
     #[test]
