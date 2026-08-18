@@ -21,6 +21,7 @@ const ROOT_AFTER_HELP: &str = "\
 常见查询：
   flowwatch chart --period 6h
   flowwatch chart --date 2026-08-18
+  flowwatch report --period 24h --compare
   flowwatch apps --period 24h --sort download --limit 10
   flowwatch apps --period 24h --details
   flowwatch apps --from \"2026-08-18 09:00\" --to \"2026-08-18 18:00\"
@@ -85,6 +86,16 @@ const EXPLAIN_AFTER_HELP: &str = "\
 
 时间范围：
   --at、--period、--date 和 --from/--to 四种写法不能同时使用。";
+const REPORT_AFTER_HELP: &str = "\
+说明：
+  报告汇总实际流量、应用识别完整度、主要应用、最高时段和未识别流量。
+  增加 --compare 可与紧邻的上一段等长时间比较。
+
+示例：
+  flowwatch report --period 24h
+  flowwatch report --date 2026-08-18
+  flowwatch report --period 7d --compare
+  flowwatch report --period 24h --json";
 const APPS_AFTER_HELP: &str = "\
 示例：
   flowwatch apps
@@ -482,6 +493,19 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("--details"));
     }
+
+    #[test]
+    fn report_help_explains_comparison_and_structured_output() {
+        let error = localized_command()
+            .try_get_matches_from(["flowwatch", "help", "report"])
+            .unwrap_err();
+        let help = error.to_string();
+        assert!(help.contains("flowwatch report --period 7d --compare"));
+        assert!(help.contains("--json"));
+        assert!(
+            Cli::try_parse_from(["flowwatch", "report", "--period", "24h", "--compare"]).is_ok()
+        );
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -498,6 +522,9 @@ pub enum Command {
     /// 分析流量最高或指定的时段，找出主要应用和未识别流量。
     #[command(after_help = EXPLAIN_AFTER_HELP)]
     Explain(ExplainArgs),
+    /// 生成包含总量、主要应用、高峰和数据说明的流量报告。
+    #[command(after_help = REPORT_AFTER_HELP)]
+    Report(ReportArgs),
     /// 按上传、下载或总量查看应用排行。
     #[command(after_help = APPS_AFTER_HELP)]
     Apps(AppsArgs),
@@ -646,6 +673,31 @@ pub struct ExplainArgs {
         help_heading = "选项"
     )]
     pub at: Option<String>,
+
+    /// 最多显示多少个主要应用；默认 5 个。
+    #[arg(
+        long,
+        value_name = "数量",
+        default_value_t = 5,
+        hide_default_value = true,
+        value_parser = parse_explain_limit,
+        help_heading = "选项"
+    )]
+    pub limit: usize,
+
+    /// 输出 JSON，字段名保持英文。
+    #[arg(long, help_heading = "选项")]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ReportArgs {
+    #[command(flatten)]
+    pub range: TimeRangeArgs,
+
+    /// 与紧邻的上一段等长时间比较。
+    #[arg(long, help_heading = "选项")]
+    pub compare: bool,
 
     /// 最多显示多少个主要应用；默认 5 个。
     #[arg(

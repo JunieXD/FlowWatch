@@ -2,7 +2,7 @@ use crate::chart as terminal_chart;
 use crate::clash_config::read_clash_config;
 use crate::cli::{
     AppArgs, AppGranularity, AppsArgs, ChartArgs, Cli, Command as CliCommand, ConfigCommand,
-    ExplainArgs, InstallArgs, QueryArgs, SortBy, TimeRangeArgs,
+    ExplainArgs, InstallArgs, QueryArgs, ReportArgs, SortBy, TimeRangeArgs,
 };
 use crate::collector::{Collector, RuntimeSettings, acquire_lock};
 use crate::paths::{AGENT_LABEL, AppPaths};
@@ -37,6 +37,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         CliCommand::Status => status(&paths),
         CliCommand::Chart(args) => chart(&paths, args),
         CliCommand::Explain(args) => explain(&paths, args),
+        CliCommand::Report(args) => report(&paths, args),
         CliCommand::Apps(args) => apps(&paths, args),
         CliCommand::App(args) => app(&paths, args),
         CliCommand::Interfaces(args) => interfaces(&paths, args),
@@ -346,6 +347,220 @@ fn explain_range(
         )),
         None => Ok((requested, true)),
     }
+}
+
+fn report(paths: &AppPaths, args: ReportArgs) -> Result<()> {
+    validate_time_range(&args.range)?;
+    let range = parse_time_range(&args.range)?;
+    let database = Database::open(&paths.database)?;
+    let meta = database.meta()?;
+
+    let actual = TrafficTotals::from(sum_interfaces(
+        &database.query_interfaces(range.start, range.end)?,
+    ));
+    let app_start = attribution_window_start(&meta, range.start);
+    let mut app_rows = if app_start < range.end {
+        Database::group_apps_for_display(database.query_apps(app_start, range.end)?)
+    } else {
+        Vec::new()
+    };
+    let app_physical = if app_start < range.end {
+        sum_interfaces(&database.query_interfaces(app_start, range.end)?)
+    } else {
+        (0, 0)
+    };
+    let coverage = AppCoverageSummary::new(&app_rows, app_physical);
+    sort_apps(&mut app_rows, SortBy::Total);
+    app_rows.truncate(args.limit);
+
+    let peak = report_peak(&database, range.start, range.end)?;
+    let gap = if app_start < range.end {
+        let bucket_seconds = gap_bucket_seconds(&database, &meta, app_start)?;
+        database
+            .query_attribution_gaps(app_start, range.end, bucket_seconds)?
+            .into_iter()
+            .max_by_key(|row| row.gap_upload.saturating_add(row.gap_download))
+            .map(|row| ReportGap::new(row, bucket_seconds))
+    } else {
+        None
+    };
+    let comparison = if args.compare {
+        let duration = range.end.saturating_sub(range.start);
+        let previous = TrafficTotals::from(sum_interfaces(
+            &database.query_interfaces(range.start.saturating_sub(duration), range.start)?,
+        ));
+        Some(TrafficComparison::new(actual, previous))
+    } else {
+        None
+    };
+    let anomalies = if app_start < range.end {
+        database
+            .direct_attribution_anomalies(app_start, range.end)?
+            .len()
+    } else {
+        0
+    };
+    let notices = report_notices(&range, app_start, actual, &coverage, anomalies, &meta);
+
+    if args.json {
+        let output = ReportOutput {
+            range: RangeOutput::from(&range),
+            actual,
+            comparison,
+            application_start: app_start.min(range.end),
+            coverage,
+            apps: app_rows.iter().map(AppOutput::from).collect(),
+            peak,
+            unidentified_peak: gap,
+            notices,
+        };
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
+    println!("FlowWatch 流量报告（{}）", range.label);
+    println!(
+        "实际流量：上传 {}  下载 {}  合计 {}",
+        human_bytes(actual.upload),
+        human_bytes(actual.download),
+        human_bytes(actual.total),
+    );
+    if let Some(comparison) = comparison {
+        println!("与上一段等长时间相比：");
+        println!(
+            "  上传 {}  下载 {}  合计 {}",
+            change_label(comparison.upload_percent),
+            change_label(comparison.download_percent),
+            change_label(comparison.total_percent),
+        );
+    }
+    println!();
+    println!("应用情况");
+    if app_start > range.start && app_start < range.end {
+        println!(
+            "应用记录从 {} 开始，较早流量不计入下面的应用统计。",
+            format_timestamp(app_start)
+        );
+    }
+    print_app_coverage(&coverage);
+    if app_rows.is_empty() {
+        println!("  没有可显示的应用记录。");
+    } else {
+        println!("  主要应用：");
+        for (index, app) in app_rows.iter().enumerate() {
+            println!(
+                "    {}. {}：{}",
+                index + 1,
+                display_app_name(&app.app.name),
+                human_bytes(app.upload().saturating_add(app.download())),
+            );
+        }
+    }
+    println!();
+    println!("高流量时段");
+    match peak {
+        Some(peak) => println!(
+            "  实际流量最高：{} 起的{}，合计 {}",
+            format_timestamp(peak.bucket),
+            bucket_label(peak.interval_seconds),
+            human_bytes(peak.total),
+        ),
+        None => println!("  所选时间内没有流量记录。"),
+    }
+    match gap {
+        Some(gap) if gap.total > 0 => println!(
+            "  未找到应用最多：{} 起的{}，合计 {}",
+            format_timestamp(gap.bucket),
+            bucket_label(gap.interval_seconds),
+            human_bytes(gap.total),
+        ),
+        _ => println!("  没有发现明显的未识别流量时段。"),
+    }
+    if !notices.is_empty() {
+        println!();
+        println!("数据说明");
+        for notice in &notices {
+            println!("  - {notice}");
+        }
+    }
+    if let Some(peak) = peak {
+        println!();
+        println!(
+            "进一步分析：flowwatch explain --at \"{}\"",
+            format_timestamp(peak.bucket)
+        );
+    }
+    Ok(())
+}
+
+fn report_peak(database: &Database, start: i64, end: i64) -> Result<Option<ReportPeak>> {
+    if let Some(peak) = database
+        .query_spikes(start, end)?
+        .into_iter()
+        .max_by_key(|row| row.upload.saturating_add(row.download))
+    {
+        return Ok(Some(ReportPeak {
+            bucket: peak.bucket,
+            interval_seconds: 60,
+            upload: peak.upload,
+            download: peak.download,
+            total: peak.upload.saturating_add(peak.download),
+        }));
+    }
+    Ok(database
+        .query_traffic_samples(start, end)?
+        .into_iter()
+        .max_by(|left, right| {
+            let left_rate = left.upload.saturating_add(left.download) as u128
+                * right.interval_seconds.max(1) as u128;
+            let right_rate = right.upload.saturating_add(right.download) as u128
+                * left.interval_seconds.max(1) as u128;
+            left_rate.cmp(&right_rate)
+        })
+        .map(|sample| ReportPeak {
+            bucket: sample.bucket,
+            interval_seconds: sample.interval_seconds,
+            upload: sample.upload,
+            download: sample.download,
+            total: sample.upload.saturating_add(sample.download),
+        }))
+}
+
+fn report_notices(
+    range: &Period,
+    app_start: i64,
+    actual: TrafficTotals,
+    coverage: &AppCoverageSummary,
+    anomalies: usize,
+    meta: &std::collections::BTreeMap<String, String>,
+) -> Vec<String> {
+    let mut notices = Vec::new();
+    if actual.total == 0 {
+        notices.push("所选时间内没有网卡流量记录。".to_string());
+    }
+    if app_start > range.start {
+        notices.push(format!(
+            "应用记录只覆盖从 {} 开始的部分范围。",
+            format_timestamp(app_start.min(range.end))
+        ));
+    }
+    if coverage.overcount {
+        notices.push("应用流量超过网卡实际流量，请运行 flowwatch doctor 检查。".to_string());
+    } else if coverage.coverage_percent.is_some_and(|value| value < 50.0) {
+        notices.push("找到对应应用的流量不足一半，应用排行只能作为线索。".to_string());
+    }
+    if anomalies > 0 {
+        notices.push(format!("有 {anomalies} 个应用记录超过同期网卡实际流量。"));
+    }
+    let now = Local::now().timestamp();
+    if meta
+        .get("last_flush_at")
+        .and_then(|value| value.parse::<i64>().ok())
+        .is_none_or(|timestamp| now.saturating_sub(timestamp) > 180)
+    {
+        notices.push("采集数据超过三分钟没有更新，请运行 flowwatch doctor。".to_string());
+    }
+    notices
 }
 
 fn bucket_label(seconds: i64) -> String {
@@ -1266,6 +1481,85 @@ struct AppDetailOutput<'a> {
 }
 
 #[derive(Serialize)]
+struct ReportOutput<'a> {
+    range: RangeOutput<'a>,
+    actual: TrafficTotals,
+    comparison: Option<TrafficComparison>,
+    application_start: i64,
+    coverage: AppCoverageSummary,
+    apps: Vec<AppOutput<'a>>,
+    peak: Option<ReportPeak>,
+    unidentified_peak: Option<ReportGap>,
+    notices: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+struct TrafficTotals {
+    upload: u64,
+    download: u64,
+    total: u64,
+}
+
+impl From<(u64, u64)> for TrafficTotals {
+    fn from(value: (u64, u64)) -> Self {
+        Self {
+            upload: value.0,
+            download: value.1,
+            total: value.0.saturating_add(value.1),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+struct TrafficComparison {
+    previous: TrafficTotals,
+    upload_percent: Option<f64>,
+    download_percent: Option<f64>,
+    total_percent: Option<f64>,
+}
+
+impl TrafficComparison {
+    fn new(current: TrafficTotals, previous: TrafficTotals) -> Self {
+        Self {
+            previous,
+            upload_percent: relative_change(current.upload, previous.upload),
+            download_percent: relative_change(current.download, previous.download),
+            total_percent: relative_change(current.total, previous.total),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+struct ReportPeak {
+    bucket: i64,
+    interval_seconds: i64,
+    upload: u64,
+    download: u64,
+    total: u64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+struct ReportGap {
+    bucket: i64,
+    interval_seconds: i64,
+    upload: u64,
+    download: u64,
+    total: u64,
+}
+
+impl ReportGap {
+    fn new(value: AttributionGap, interval_seconds: i64) -> Self {
+        Self {
+            bucket: value.bucket,
+            interval_seconds,
+            upload: value.gap_upload,
+            download: value.gap_download,
+            total: value.gap_upload.saturating_add(value.gap_download),
+        }
+    }
+}
+
+#[derive(Serialize)]
 struct AppPeakOutput {
     bucket: i64,
     interval_seconds: i64,
@@ -1311,6 +1605,15 @@ fn comparison_label(change: Option<f64>) -> String {
         Some(change) if change >= 0.0 => format!("当前时段高 {change:.1}%"),
         Some(change) => format!("当前时段低 {:.1}%", change.abs()),
         None => "没有可比较的流量记录".to_string(),
+    }
+}
+
+fn change_label(change: Option<f64>) -> String {
+    match change {
+        Some(change) if change > 0.05 => format!("增加 {change:.1}%"),
+        Some(change) if change < -0.05 => format!("减少 {:.1}%", change.abs()),
+        Some(_) => "基本不变".to_string(),
+        None => "没有上一周期数据".to_string(),
     }
 }
 
@@ -2233,6 +2536,48 @@ mod tests {
         assert_eq!(comparison.next_percent, Some(-50.0));
         assert_eq!(relative_change(100, 0), None);
         assert_eq!(comparison_label(Some(-25.0)), "当前时段低 25.0%");
+    }
+
+    #[test]
+    fn report_comparison_preserves_each_direction_and_missing_baselines() {
+        let comparison = TrafficComparison::new(
+            TrafficTotals::from((200, 50)),
+            TrafficTotals::from((100, 100)),
+        );
+        assert_eq!(comparison.upload_percent, Some(100.0));
+        assert_eq!(comparison.download_percent, Some(-50.0));
+        assert_eq!(comparison.total_percent, Some(25.0));
+        assert_eq!(change_label(comparison.total_percent), "增加 25.0%");
+
+        let missing =
+            TrafficComparison::new(TrafficTotals::from((10, 20)), TrafficTotals::from((0, 0)));
+        assert_eq!(missing.total_percent, None);
+        assert_eq!(change_label(None), "没有上一周期数据");
+    }
+
+    #[test]
+    fn report_notices_explain_partial_application_history() {
+        let now = Local::now().timestamp();
+        let range = Period {
+            start: now - 3_600,
+            end: now,
+            label: "测试".into(),
+            exact: false,
+        };
+        let coverage = AppCoverageSummary::new(&[], (100, 100));
+        let meta =
+            std::collections::BTreeMap::from([("last_flush_at".to_string(), now.to_string())]);
+        let notices = report_notices(
+            &range,
+            now - 1_800,
+            TrafficTotals::from((100, 100)),
+            &coverage,
+            0,
+            &meta,
+        );
+        assert!(notices.iter().any(|value| value.contains("部分范围")));
+        assert!(notices.iter().any(|value| value.contains("不足一半")));
+        assert!(!notices.iter().any(|value| value.contains("三分钟")));
     }
 
     #[test]

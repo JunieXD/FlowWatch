@@ -59,6 +59,16 @@ flowwatch apps --period 24h --details
 
 应用可以使用显示名称或完整应用 ID。名称匹配到多个程序时，FlowWatch 会列出候选项并要求使用完整 ID，不会猜测用户想查看哪一个。应用趋势只包含已经找到对应应用的流量，因此可能低于该应用的实际使用量。
 
+生成一份不需要组合多个查询命令的流量报告：
+
+```sh
+flowwatch report --period 24h
+flowwatch report --period 7d --compare
+flowwatch report --date 2026-08-18
+```
+
+报告包含实际总量、应用识别完整度、主要应用、实际流量最高时段、未找到应用最多的时段和数据质量说明。`--compare` 会与紧邻的上一段等长时间比较；`--json` 可输出相同内容的结构化结果。
+
 ### 查看流量趋势
 
 ```sh
@@ -118,6 +128,7 @@ Clash 并非必需。不开系统代理、不使用 Clash 时，标准模式仍�
 | `flowwatch status` | 查看采集服务、实际总量、已识别应用和 Clash 状态。 |
 | `flowwatch chart` | 在终端绘制上传、下载和合计流量趋势图。 |
 | `flowwatch explain` | 分析指定或最高流量时段的主要应用和未识别流量。 |
+| `flowwatch report` | 一次生成总量、主要应用、高峰和数据说明。 |
 | `flowwatch apps` | 按上传、下载或总量查看应用排行。 |
 | `flowwatch app` | 查看单个应用的流量、身份、路径和最高时段。 |
 | `flowwatch interfaces` | 查看各物理网卡的实际流量。 |
