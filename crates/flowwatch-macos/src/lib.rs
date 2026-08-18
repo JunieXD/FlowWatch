@@ -16,6 +16,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const NETWORKSETUP: &str = "/usr/sbin/networksetup";
 const NETTOP: &str = "/usr/bin/nettop";
+const CODESIGN: &str = "/usr/bin/codesign";
 const INTERFACE_REFRESH: Duration = Duration::from_secs(300);
 const NETTOP_TIMEOUT: Duration = Duration::from_secs(5);
 const PROCESS_TOMBSTONE_SECONDS: i64 = 86_400;
@@ -409,11 +410,19 @@ impl AppIdentityResolver {
             return identity.clone();
         }
         let path = process_path(pid).unwrap_or_default();
-        let identity = if path.is_empty() {
+        let mut identity = if path.is_empty() {
             self.resolve_name(fallback)
         } else {
             self.resolve_path(&path, fallback)
         };
+        if !path.is_empty()
+            && outermost_app_bundle(Path::new(&path)).is_none()
+            && is_likely_auxiliary(fallback, &path)
+            && let Some(parent) = parent_app_identity(pid, &path)
+        {
+            identity = parent;
+            self.remember_name(fallback, &identity);
+        }
         self.by_pid
             .insert(pid, (fallback.to_string(), identity.clone()));
         identity
@@ -427,7 +436,13 @@ impl AppIdentityResolver {
             self.remember_name(&identity.name, &identity);
             return identity;
         }
-        let identity = identity_from_path(&normalized_path, fallback);
+        let mut identity = identity_from_path(&normalized_path, fallback);
+        if identity.id.starts_with("path:")
+            && is_likely_auxiliary(fallback, &normalized_path)
+            && let Some(signing) = signing_identity(&normalized_path, fallback)
+        {
+            identity = signing;
+        }
         self.by_path.insert(normalized_path, identity.clone());
         self.remember_name(fallback, &identity);
         self.remember_name(&identity.name, &identity);
@@ -484,6 +499,116 @@ fn process_path(pid: i32) -> Option<String> {
         .position(|byte| *byte == 0)
         .unwrap_or(size as usize);
     Some(String::from_utf8_lossy(&buffer[..end]).into_owned())
+}
+
+fn parent_app_identity(pid: i32, child_path: &str) -> Option<AppIdentity> {
+    let mut current = pid;
+    let mut visited = HashSet::new();
+    for _ in 0..6 {
+        let parent = parent_pid(current)?;
+        if parent <= 1 || !visited.insert(parent) {
+            return None;
+        }
+        let path = process_path(parent).unwrap_or_default();
+        if !path.is_empty() && outermost_app_bundle(Path::new(&path)).is_some() {
+            let fallback = Path::new(&path)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or(UNKNOWN);
+            let mut identity = identity_from_path(&path, fallback);
+            if identity.id.starts_with("bundle:") || identity.id.starts_with("app:") {
+                identity.executable_path = child_path.to_string();
+                return Some(identity);
+            }
+        }
+        current = parent;
+    }
+    None
+}
+
+fn parent_pid(pid: i32) -> Option<i32> {
+    if pid <= 0 {
+        return None;
+    }
+    let mut buffer = [0u8; 256];
+    // SAFETY: proc_pidinfo receives a valid writable buffer. PROC_PIDTBSDINFO starts with
+    // five native-endian u32 values; the fifth is the parent pid on supported macOS versions.
+    let written = unsafe {
+        proc_pidinfo(
+            pid,
+            PROC_PIDTBSDINFO,
+            0,
+            buffer.as_mut_ptr().cast(),
+            buffer.len() as i32,
+        )
+    };
+    if written < 20 {
+        return None;
+    }
+    let raw = u32::from_ne_bytes(buffer[16..20].try_into().ok()?);
+    i32::try_from(raw).ok().filter(|parent| *parent > 0)
+}
+
+fn is_likely_auxiliary(name: &str, path: &str) -> bool {
+    let value = format!(
+        "{name} {}",
+        Path::new(path)
+            .file_name()
+            .and_then(|v| v.to_str())
+            .unwrap_or("")
+    )
+    .to_ascii_lowercase();
+    [
+        "helper",
+        "service",
+        "renderer",
+        "headless",
+        "gpu process",
+        "utility process",
+        "web process",
+    ]
+    .iter()
+    .any(|marker| value.contains(marker))
+}
+
+fn signing_identity(executable: &str, fallback: &str) -> Option<AppIdentity> {
+    let output = Command::new(CODESIGN)
+        .args(["-d", "--verbose=4", executable])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    identity_from_signing_output(
+        executable,
+        fallback,
+        &String::from_utf8_lossy(&output.stderr),
+    )
+}
+
+fn identity_from_signing_output(
+    executable: &str,
+    fallback: &str,
+    output: &str,
+) -> Option<AppIdentity> {
+    let value = |prefix: &str| {
+        output
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(prefix))
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && *value != "not set")
+    };
+    let identifier = value("Identifier=")?;
+    let team = value("TeamIdentifier=");
+    let id = team.map_or_else(
+        || format!("signature:{identifier}"),
+        |team| format!("signature:{team}:{identifier}"),
+    );
+    Some(AppIdentity {
+        id,
+        name: preferred_process_name(executable, fallback),
+        executable_path: executable.to_string(),
+    })
 }
 
 fn canonical_executable_path(path: &str) -> String {
@@ -566,7 +691,16 @@ fn preferred_process_name(executable: &str, fallback: &str) -> String {
 #[link(name = "proc")]
 unsafe extern "C" {
     fn proc_pidpath(pid: libc::c_int, buffer: *mut libc::c_void, buffersize: u32) -> libc::c_int;
+    fn proc_pidinfo(
+        pid: libc::c_int,
+        flavor: libc::c_int,
+        arg: u64,
+        buffer: *mut libc::c_void,
+        buffersize: libc::c_int,
+    ) -> libc::c_int;
 }
+
+const PROC_PIDTBSDINFO: libc::c_int = 3;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -695,6 +829,50 @@ udp4 *:5353<->*:*,en1,250,350,\n";
         let ambiguous = resolver.resolve_name("gh");
         assert_eq!(ambiguous.id, "process:gh");
         assert!(ambiguous.executable_path.is_empty());
+    }
+
+    #[test]
+    fn identifies_only_explicit_auxiliary_process_names() {
+        assert!(is_likely_auxiliary(
+            "Browser Helper (Renderer)",
+            "/tmp/Browser Helper"
+        ));
+        assert!(is_likely_auxiliary(
+            "chrome-headless-shell",
+            "/tmp/chrome-headless-shell"
+        ));
+        assert!(!is_likely_auxiliary("curl", "/usr/bin/curl"));
+        assert!(!is_likely_auxiliary(
+            "git-remote-http",
+            "/usr/bin/git-remote-http"
+        ));
+    }
+
+    #[test]
+    fn builds_stable_identity_from_code_signature_details() {
+        let signed = identity_from_signing_output(
+            "/tmp/version-2/Browser Helper",
+            "Browser Helper",
+            "Executable=/tmp/Browser Helper\nIdentifier=com.example.helper\nTeamIdentifier=TEAM123\n",
+        )
+        .unwrap();
+        assert_eq!(signed.id, "signature:TEAM123:com.example.helper");
+        assert_eq!(signed.name, "Browser Helper");
+        assert_eq!(signed.executable_path, "/tmp/version-2/Browser Helper");
+
+        let ad_hoc = identity_from_signing_output(
+            "/tmp/headless_shell",
+            "headless_shell",
+            "Identifier=headless_shell\nTeamIdentifier=not set\n",
+        )
+        .unwrap();
+        assert_eq!(ad_hoc.id, "signature:headless_shell");
+        assert!(identity_from_signing_output("/tmp/tool", "tool", "TeamIdentifier=T\n").is_none());
+    }
+
+    #[test]
+    fn reads_the_current_process_parent() {
+        assert!(parent_pid(std::process::id() as i32).is_some());
     }
 
     #[test]

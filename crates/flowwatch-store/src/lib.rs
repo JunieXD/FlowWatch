@@ -8,7 +8,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 #[derive(Debug, Default)]
 pub struct FlushBatch {
@@ -22,6 +22,8 @@ pub struct FlushBatch {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct AppUsage {
     pub app: AppIdentity,
+    pub custom_name: Option<String>,
+    pub original_names: Vec<String>,
     pub direct_upload: u64,
     pub direct_download: u64,
     pub clash_upload: u64,
@@ -34,6 +36,13 @@ pub struct AppUsage {
     pub identity_count: u32,
     pub identity_ids: Vec<String>,
     pub executable_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AppName {
+    pub app_id: String,
+    pub display_name: String,
+    pub updated_at: i64,
 }
 
 impl AppUsage {
@@ -252,6 +261,12 @@ impl Database {
                 notified_at INTEGER NOT NULL,
                 PRIMARY KEY (rule_id, period_start, stage)
             ) WITHOUT ROWID;
+
+            CREATE TABLE IF NOT EXISTS app_names (
+                app_id TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            ) WITHOUT ROWID;
             ",
         )?;
         self.ensure_proxy_actor_columns()?;
@@ -408,6 +423,43 @@ impl Database {
             params![rule_id, period_start, stage, notified_at],
         )?;
         Ok(())
+    }
+
+    pub fn set_app_name(
+        &mut self,
+        app_id: &str,
+        display_name: &str,
+        updated_at: i64,
+    ) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO app_names(app_id, display_name, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(app_id) DO UPDATE SET
+                 display_name=excluded.display_name,
+                 updated_at=excluded.updated_at",
+            params![app_id, display_name, updated_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn app_names(&self) -> Result<Vec<AppName>> {
+        let mut statement = self.connection.prepare(
+            "SELECT app_id, display_name, updated_at FROM app_names ORDER BY display_name, app_id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(AppName {
+                app_id: row.get(0)?,
+                display_name: row.get(1)?,
+                updated_at: row.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn remove_app_name(&mut self, app_id: &str) -> Result<bool> {
+        Ok(self
+            .connection
+            .execute("DELETE FROM app_names WHERE app_id=?1", [app_id])?
+            > 0)
     }
 
     pub fn meta(&self) -> Result<BTreeMap<String, String>> {
@@ -619,6 +671,32 @@ impl Database {
         Ok(consolidate_app_usages(by_app.into_values()))
     }
 
+    pub fn query_display_apps(&self, start: i64, end: i64) -> Result<Vec<AppUsage>> {
+        let mut rows = Self::group_apps_for_display(self.query_apps(start, end)?);
+        self.apply_app_names(&mut rows)?;
+        Ok(rows)
+    }
+
+    pub fn apply_app_names(&self, rows: &mut [AppUsage]) -> Result<()> {
+        let names: HashMap<_, _> = self
+            .app_names()?
+            .into_iter()
+            .map(|name| (name.app_id, name.display_name))
+            .collect();
+        for row in rows {
+            let display_name = names.get(&row.app.id).or_else(|| {
+                row.identity_ids
+                    .iter()
+                    .find_map(|identity_id| names.get(identity_id))
+            });
+            if let Some(display_name) = display_name {
+                row.custom_name = Some(display_name.clone());
+                row.app.name = display_name.clone();
+            }
+        }
+        Ok(())
+    }
+
     pub fn query_app_samples(
         &self,
         start: i64,
@@ -717,18 +795,25 @@ impl Database {
                         .to_string();
                     merge_app_usage(target, row);
                     if distinct_ids {
-                        target.app.id = format!(
-                            "group:{}:{}",
-                            normalized_name(&group_name),
-                            normalized_name(&group_executable)
-                        );
+                        target.app.id = display_group_id(&group_name, &group_executable);
                         target.app.name = group_name;
                         target.app.executable_path.clear();
                     }
                 }
             }
         }
-        groups.into_values().collect()
+        groups
+            .into_values()
+            .map(|mut row| {
+                if row.app.id.starts_with("path:") {
+                    let executable = executable_file_name(&row.app.executable_path)
+                        .unwrap_or(&row.app.name)
+                        .to_string();
+                    row.app.id = display_group_id(&row.app.name, &executable);
+                }
+                row
+            })
+            .collect()
     }
 
     pub fn query_interfaces(&self, start: i64, end: i64) -> Result<Vec<InterfaceUsage>> {
@@ -1337,6 +1422,14 @@ fn consolidate_app_usages(rows: impl IntoIterator<Item = AppUsage>) -> Vec<AppUs
 }
 
 fn merge_app_usage(target: &mut AppUsage, source: AppUsage) {
+    for original_name in source.original_names {
+        if !target.original_names.contains(&original_name) {
+            target.original_names.push(original_name);
+        }
+    }
+    if target.custom_name.is_none() {
+        target.custom_name = source.custom_name;
+    }
     for identity_id in source.identity_ids {
         if !target.identity_ids.contains(&identity_id) {
             target.identity_ids.push(identity_id);
@@ -1375,6 +1468,9 @@ fn merge_first_seen(target: &mut i64, candidate: i64) {
 }
 
 fn record_app_identity(usage: &mut AppUsage, identity: &AppIdentity) {
+    if !identity.name.is_empty() && !usage.original_names.contains(&identity.name) {
+        usage.original_names.push(identity.name.clone());
+    }
     if !usage.identity_ids.contains(&identity.id) {
         usage.identity_ids.push(identity.id.clone());
     }
@@ -1429,6 +1525,14 @@ fn executable_file_name(path: &str) -> Option<&str> {
 
 fn normalized_name(name: &str) -> String {
     name.trim().to_lowercase()
+}
+
+fn display_group_id(name: &str, executable: &str) -> String {
+    format!(
+        "group:{}:{}",
+        normalized_name(name),
+        normalized_name(executable)
+    )
 }
 
 fn sql_u64(value: u64) -> i64 {
@@ -1676,7 +1780,49 @@ mod tests {
         assert_eq!(rows[0].upload(), 300);
         assert_eq!(rows[0].identity_count, 2);
         assert_eq!(rows[0].executable_paths.len(), 2);
-        assert!(rows[0].app.id.starts_with("group:"));
+        assert_eq!(
+            rows[0].app.id,
+            "group:chrome-headless-shell:chrome-headless-shell"
+        );
+        assert_eq!(rows[0].original_names, ["chrome-headless-shell"]);
+    }
+
+    #[test]
+    fn custom_name_survives_executable_path_changes() {
+        let (root, mut database) = temporary_database();
+        let app_id = "group:chrome-headless-shell:chrome-headless-shell";
+        database.set_app_name(app_id, "自动化浏览器", 100).unwrap();
+
+        let mut old_rows = Database::group_apps_for_display(consolidate_app_usages([app_usage(
+            "path:/cache/version-1/chrome-headless-shell",
+            "chrome-headless-shell",
+            "/cache/version-1/chrome-headless-shell",
+            100,
+            0,
+        )]));
+        database.apply_app_names(&mut old_rows).unwrap();
+        assert_eq!(old_rows[0].app.id, app_id);
+        assert_eq!(old_rows[0].app.name, "自动化浏览器");
+        assert_eq!(old_rows[0].custom_name.as_deref(), Some("自动化浏览器"));
+        assert_eq!(old_rows[0].original_names, ["chrome-headless-shell"]);
+
+        let mut new_rows = Database::group_apps_for_display(consolidate_app_usages([app_usage(
+            "path:/cache/version-2/chrome-headless-shell",
+            "chrome-headless-shell",
+            "/cache/version-2/chrome-headless-shell",
+            200,
+            0,
+        )]));
+        database.apply_app_names(&mut new_rows).unwrap();
+        assert_eq!(new_rows[0].app.id, app_id);
+        assert_eq!(new_rows[0].app.name, "自动化浏览器");
+        assert_eq!(database.app_names().unwrap().len(), 1);
+
+        assert!(database.remove_app_name(app_id).unwrap());
+        assert!(database.app_names().unwrap().is_empty());
+        assert!(!database.remove_app_name(app_id).unwrap());
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

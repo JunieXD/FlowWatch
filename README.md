@@ -59,6 +59,17 @@ flowwatch apps --period 24h --details
 
 应用可以使用显示名称或完整应用 ID。名称匹配到多个程序时，FlowWatch 会列出候选项并要求使用完整 ID，不会猜测用户想查看哪一个。应用趋势只包含已经找到对应应用的流量，因此可能低于该应用的实际使用量。
 
+可以为不易理解的进程设置自己的名称。先用 `--details` 查看应用 ID，再设置名称：
+
+```sh
+flowwatch apps --period 24h --details
+flowwatch config app-names set "group:chrome-headless-shell:chrome-headless-shell" "自动化浏览器"
+flowwatch config app-names list
+flowwatch config app-names remove "group:chrome-headless-shell:chrome-headless-shell"
+```
+
+自定义名称会用于历史查询、趋势和提醒，但不会改写原始数据。详情仍会显示原始名称、底层身份和可执行路径。路径型程序使用稳定的 `group:` ID，因此升级后路径发生变化时通常不需要重新设置。
+
 生成一份不需要组合多个查询命令的流量报告：
 
 ```sh
@@ -164,7 +175,7 @@ Clash 并非必需。不开系统代理、不使用 Clash 时，标准模式仍�
 | `flowwatch spikes` | 查看流量最高的分钟。 |
 | `flowwatch gaps` | 查看未识别流量较高的时间段。 |
 | `flowwatch doctor` | 检查数据库、采集服务、权限和登录自启状态。 |
-| `flowwatch config` | 管理 Clash 设置和应用明细精度。 |
+| `flowwatch config` | 管理应用名称、Clash 设置和应用明细精度。 |
 | `flowwatch install` | 安装或更新当前用户的登录自启服务。 |
 | `flowwatch uninstall` | 删除服务和程序，默认保留历史数据。 |
 

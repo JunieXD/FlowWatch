@@ -190,6 +190,8 @@ const UNINSTALL_AFTER_HELP: &str = "\
 const CONFIG_AFTER_HELP: &str = "\
 常见操作：
   flowwatch config show
+  flowwatch config app-names list
+  flowwatch config app-names set <应用ID> \"我的名称\"
   flowwatch config import-clash \"/path/to/config.yaml\"
   flowwatch config set-app-granularity 1m
   flowwatch config disable-clash
@@ -215,6 +217,14 @@ const SHOW_CONFIG_AFTER_HELP: &str = "\
   flowwatch config show
 
 Clash/Mihomo 密钥只显示为 [已隐藏]，不会输出原文。";
+const APP_NAMES_AFTER_HELP: &str = "\
+应用 ID 可通过 flowwatch apps --details 查看。路径型程序会使用不随安装路径变化的 group: ID。
+
+示例：
+  flowwatch config app-names list
+  flowwatch config app-names set \"bundle:com.example.App\" \"工作浏览器\"
+  flowwatch config app-names set \"group:chrome-headless-shell:chrome-headless-shell\" \"自动化浏览器\"
+  flowwatch config app-names remove \"bundle:com.example.App\"";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -589,6 +599,37 @@ mod tests {
         let help = error.to_string();
         assert!(help.contains("达到限额的 80% 和 100%"));
         assert!(help.contains("flowwatch alerts add --app \"ChatGPT\""));
+    }
+
+    #[test]
+    fn app_name_commands_are_discoverable_and_parse_nested_actions() {
+        assert!(
+            Cli::try_parse_from([
+                "flowwatch",
+                "config",
+                "app-names",
+                "set",
+                "bundle:com.example.App",
+                "工作浏览器",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "flowwatch",
+                "config",
+                "app-names",
+                "remove",
+                "bundle:com.example.App",
+            ])
+            .is_ok()
+        );
+        let error = localized_command()
+            .try_get_matches_from(["flowwatch", "help", "config", "app-names"])
+            .unwrap_err();
+        let help = error.to_string();
+        assert!(help.contains("flowwatch apps --details"));
+        assert!(help.contains("group:chrome-headless-shell"));
     }
 }
 
@@ -1166,6 +1207,9 @@ pub struct ConfigArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum ConfigCommand {
+    /// 管理应用的自定义显示名称。
+    #[command(after_help = APP_NAMES_AFTER_HELP)]
+    AppNames(AppNamesArgs),
     /// 从 Mihomo config.yaml 导入控制器地址和密钥。
     #[command(after_help = IMPORT_CLASH_AFTER_HELP)]
     ImportClash {
@@ -1190,4 +1234,28 @@ pub enum ConfigCommand {
     /// 显示设置；密钥内容会隐藏。
     #[command(after_help = SHOW_CONFIG_AFTER_HELP)]
     Show,
+}
+
+#[derive(Debug, Args)]
+pub struct AppNamesArgs {
+    #[command(subcommand)]
+    pub command: AppNamesCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AppNamesCommand {
+    /// 查看全部自定义应用名称。
+    List,
+    /// 设置或覆盖一个应用的显示名称。
+    Set {
+        #[arg(value_name = "应用ID", help_heading = "参数")]
+        app_id: String,
+        #[arg(value_name = "名称", help_heading = "参数")]
+        display_name: String,
+    },
+    /// 删除一个应用的自定义名称。
+    Remove {
+        #[arg(value_name = "应用ID", help_heading = "参数")]
+        app_id: String,
+    },
 }

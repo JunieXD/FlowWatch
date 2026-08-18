@@ -1,9 +1,9 @@
 use crate::chart as terminal_chart;
 use crate::clash_config::read_clash_config;
 use crate::cli::{
-    AlertsCommand, AppArgs, AppGranularity, AppsArgs, ChartArgs, Cli, Command as CliCommand,
-    ConfigCommand, ExplainArgs, InstallArgs, InvestigateCommand, QueryArgs, ReportArgs, SortBy,
-    TimeRangeArgs,
+    AlertsCommand, AppArgs, AppGranularity, AppNamesCommand, AppsArgs, ChartArgs, Cli,
+    Command as CliCommand, ConfigCommand, ExplainArgs, InstallArgs, InvestigateCommand, QueryArgs,
+    ReportArgs, SortBy, TimeRangeArgs,
 };
 use crate::collector::{Collector, RuntimeSettings, acquire_lock};
 use crate::paths::{AGENT_LABEL, AppPaths};
@@ -69,12 +69,15 @@ fn alerts(paths: &AppPaths, command: AlertsCommand) -> Result<()> {
             let (ids, app_name) = if let Some(selector) = app {
                 let meta = database.meta()?;
                 let start = attribution_window_start(&meta, 0);
-                let rows = Database::group_apps_for_display(
-                    database.query_apps(start, Local::now().timestamp().saturating_add(1))?,
-                );
+                let rows = database
+                    .query_display_apps(start, Local::now().timestamp().saturating_add(1))?;
                 let selected = select_app(&rows, &selector)?;
+                let mut identity_ids = selected.identity_ids;
+                if !identity_ids.contains(&selected.app.id) {
+                    identity_ids.push(selected.app.id);
+                }
                 (
-                    selected.identity_ids,
+                    identity_ids,
                     display_app_name(&selected.app.name).to_string(),
                 )
             } else {
@@ -185,10 +188,9 @@ fn chart(paths: &AppPaths, args: ChartArgs) -> Result<()> {
         } else {
             Vec::new()
         };
-        Some(select_app(
-            &Database::group_apps_for_display(rows),
-            selector,
-        )?)
+        let mut rows = Database::group_apps_for_display(rows);
+        database.apply_app_names(&mut rows)?;
+        Some(select_app(&rows, selector)?)
     } else {
         None
     };
@@ -319,6 +321,7 @@ fn explain(paths: &AppPaths, args: ExplainArgs) -> Result<()> {
         Vec::new()
     };
     let mut app_rows = Database::group_apps_for_display(app_rows);
+    database.apply_app_names(&mut app_rows)?;
     let summary = AppCoverageSummary::new(&app_rows, physical);
     sort_apps(&mut app_rows, SortBy::Total);
     app_rows.truncate(args.limit);
@@ -484,7 +487,7 @@ fn report(paths: &AppPaths, args: ReportArgs) -> Result<()> {
     ));
     let app_start = attribution_window_start(&meta, range.start);
     let mut app_rows = if app_start < range.end {
-        Database::group_apps_for_display(database.query_apps(app_start, range.end)?)
+        database.query_display_apps(app_start, range.end)?
     } else {
         Vec::new()
     };
@@ -1008,6 +1011,7 @@ fn apps(paths: &AppPaths, args: AppsArgs) -> Result<()> {
         Vec::new()
     };
     let mut rows = Database::group_apps_for_display(rows);
+    database.apply_app_names(&mut rows)?;
     let physical = if has_attribution_data {
         sum_interfaces(&database.query_interfaces(range.start, range.end)?)
     } else {
@@ -1072,6 +1076,15 @@ fn apps(paths: &AppPaths, args: AppsArgs) -> Result<()> {
         );
         if details {
             println!("     应用 ID：{}", row.app.id);
+            if row.custom_name.is_some() {
+                println!("     原始名称：{}", row.original_names.join("、"));
+            }
+            if row.identity_ids.iter().any(|id| id != &row.app.id) {
+                println!("     底层身份：");
+                for id in &row.identity_ids {
+                    println!("       {id}");
+                }
+            }
             println!("     连接数量：{}", row.connections);
             if row.first_seen > 0 {
                 println!("     首次出现：{}", format_timestamp(row.first_seen));
@@ -1101,7 +1114,7 @@ fn app(paths: &AppPaths, args: AppArgs) -> Result<()> {
     if !apply_attribution_window(&mut range, &meta) {
         bail!("所选时间内没有当前版本可用的应用流量记录");
     }
-    let rows = Database::group_apps_for_display(database.query_apps(range.start, range.end)?);
+    let rows = database.query_display_apps(range.start, range.end)?;
     let selected = select_app(&rows, &args.selector)?;
     let samples = database.query_app_samples(range.start, range.end, &selected.identity_ids)?;
     let peak = samples
@@ -1146,7 +1159,14 @@ fn app(paths: &AppPaths, args: AppArgs) -> Result<()> {
         );
     }
     println!("  应用 ID：{}", selected.app.id);
-    if selected.identity_ids.len() > 1 {
+    if selected.custom_name.is_some() {
+        println!("  原始名称：{}", selected.original_names.join("、"));
+    }
+    if selected
+        .identity_ids
+        .iter()
+        .any(|id| id != &selected.app.id)
+    {
         println!("  合并的底层身份：");
         for id in &selected.identity_ids {
             println!("    {id}");
@@ -1181,12 +1201,20 @@ fn select_app(rows: &[AppUsage], selector: &str) -> Result<AppUsage> {
             row.app.id == selector
                 || row.identity_ids.iter().any(|id| id == selector)
                 || row.app.name.to_lowercase() == normalized
+                || row
+                    .original_names
+                    .iter()
+                    .any(|name| name.to_lowercase() == normalized)
         })
         .collect();
     let matches = if exact.is_empty() {
         rows.iter()
             .filter(|row| {
                 row.app.name.to_lowercase().contains(&normalized)
+                    || row
+                        .original_names
+                        .iter()
+                        .any(|name| name.to_lowercase().contains(&normalized))
                     || row.app.id.to_lowercase().contains(&normalized)
                     || row
                         .executable_paths
@@ -1596,6 +1624,46 @@ fn uninstall(paths: &AppPaths, purge_data: bool) -> Result<()> {
 fn configure(paths: &AppPaths, command: ConfigCommand) -> Result<()> {
     let mut database = Database::open(&paths.database)?;
     match command {
+        ConfigCommand::AppNames(args) => match args.command {
+            AppNamesCommand::List => {
+                let names = database.app_names()?;
+                println!("应用自定义名称");
+                if names.is_empty() {
+                    println!("还没有自定义名称。先运行 flowwatch apps --details 查看应用 ID。");
+                } else {
+                    println!(
+                        "{}  {}",
+                        table_left("自定义名称", 24),
+                        table_left("应用 ID", 52)
+                    );
+                    for name in names {
+                        println!(
+                            "{}  {}",
+                            table_left(&name.display_name, 24),
+                            table_left(&name.app_id, 52)
+                        );
+                    }
+                }
+            }
+            AppNamesCommand::Set {
+                app_id,
+                display_name,
+            } => {
+                let app_id = validate_app_id(&app_id)?;
+                let display_name = validate_display_name(&display_name)?;
+                database.set_app_name(app_id, display_name, Local::now().timestamp())?;
+                println!("已将 {app_id} 显示为“{display_name}”。");
+                println!("历史记录也会使用这个名称；底层身份和路径仍会保留在详情中。");
+            }
+            AppNamesCommand::Remove { app_id } => {
+                let app_id = validate_app_id(&app_id)?;
+                if database.remove_app_name(app_id)? {
+                    println!("已删除 {app_id} 的自定义名称。");
+                } else {
+                    bail!("{app_id} 没有设置自定义名称");
+                }
+            }
+        },
         ConfigCommand::ImportClash { path } => {
             let config = read_clash_config(&path)?;
             database.set_clash_config(&config)?;
@@ -1662,6 +1730,7 @@ fn configure(paths: &AppPaths, command: ConfigCommand) -> Result<()> {
                 "应用明细：{}",
                 app_granularity_label(app_bucket_seconds(&database)?)
             );
+            println!("应用自定义名称：{} 个", database.app_names()?.len());
             match database.clash_config()? {
                 Some(config) => {
                     println!(
@@ -1687,6 +1756,31 @@ fn configure(paths: &AppPaths, command: ConfigCommand) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn validate_app_id(value: &str) -> Result<&str> {
+    let value = value.trim();
+    if value.is_empty() || !value.contains(':') || value.chars().any(char::is_control) {
+        bail!("应用 ID 无效；请运行 flowwatch apps --details 查看完整 ID");
+    }
+    if value.chars().count() > 512 {
+        bail!("应用 ID 过长");
+    }
+    Ok(value)
+}
+
+fn validate_display_name(value: &str) -> Result<&str> {
+    let value = value.trim();
+    if value.is_empty() {
+        bail!("自定义名称不能为空");
+    }
+    if value.chars().any(char::is_control) {
+        bail!("自定义名称不能包含换行或控制字符");
+    }
+    if value.chars().count() > 80 {
+        bail!("自定义名称不能超过 80 个字符");
+    }
+    Ok(value)
 }
 
 #[derive(Serialize)]
@@ -1944,6 +2038,8 @@ fn print_app_coverage(summary: &AppCoverageSummary) {
 struct AppOutput<'a> {
     id: &'a str,
     name: &'a str,
+    custom_name: Option<&'a str>,
+    original_names: &'a [String],
     executable_path: &'a str,
     identity_count: u32,
     identity_ids: &'a [String],
@@ -1969,6 +2065,8 @@ impl<'a> From<&'a AppUsage> for AppOutput<'a> {
         Self {
             id: &value.app.id,
             name: &value.app.name,
+            custom_name: value.custom_name.as_deref(),
+            original_names: &value.original_names,
             executable_path: &value.app.executable_path,
             identity_count: value.identity_count,
             identity_ids: &value.identity_ids,
@@ -2603,6 +2701,20 @@ mod tests {
         );
         assert!(parse_period_at("0d", 1_000_000).is_err());
         assert!(parse_period_at("week", 1_000_000).is_err());
+    }
+
+    #[test]
+    fn validates_custom_application_names() {
+        assert_eq!(
+            validate_app_id(" bundle:com.example.App ").unwrap(),
+            "bundle:com.example.App"
+        );
+        assert!(validate_app_id("missing-prefix").is_err());
+        assert!(validate_app_id("bundle:bad\nvalue").is_err());
+        assert_eq!(validate_display_name(" 工作浏览器 ").unwrap(), "工作浏览器");
+        assert!(validate_display_name(" ").is_err());
+        assert!(validate_display_name("bad\nname").is_err());
+        assert!(validate_display_name(&"名".repeat(81)).is_err());
     }
 
     #[test]

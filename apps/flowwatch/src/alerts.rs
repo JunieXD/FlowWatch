@@ -119,7 +119,7 @@ fn rule_usage(database: &Database, rule: &AlertRule, start: i64, end: i64) -> Re
     }
     let ids: HashSet<_> = rule.app_ids.iter().map(String::as_str).collect();
     Ok(database
-        .query_apps(start, end)?
+        .query_display_apps(start, end)?
         .into_iter()
         .filter(|row| {
             ids.contains(row.app.id.as_str())
