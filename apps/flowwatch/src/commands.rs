@@ -241,6 +241,10 @@ fn status(paths: &AppPaths) -> Result<()> {
         );
     }
     print_collector_errors(&meta);
+    if !running {
+        println!();
+        println!("下一步：运行 flowwatch doctor 查看原因，或运行 flowwatch install 启动服务。");
+    }
     Ok(())
 }
 
@@ -312,6 +316,7 @@ fn apps(paths: &AppPaths, args: QueryArgs) -> Result<()> {
     }
     if rows.is_empty() {
         println!("所选时间内没有应用流量记录。");
+        println!("可运行 flowwatch status 确认采集服务和数据更新时间。");
     }
     Ok(())
 }
@@ -663,6 +668,11 @@ fn install(paths: &AppPaths, args: InstallArgs) -> Result<()> {
     println!("  程序文件：{}", paths.installed_binary.display());
     println!("  命令路径：{}", paths.command_binary.display());
     println!("  数据库：{}", paths.database.display());
+    println!();
+    println!("接下来：");
+    println!("  flowwatch doctor   检查采集是否正常");
+    println!("  flowwatch status   查看今天的流量概况");
+    println!("  flowwatch apps     查看今天的应用流量排行");
     Ok(())
 }
 
