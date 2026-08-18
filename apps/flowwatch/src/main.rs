@@ -6,6 +6,7 @@ mod collector;
 mod commands;
 mod investigation;
 mod paths;
+mod update;
 
 use anyhow::Result;
 use cli::Cli;

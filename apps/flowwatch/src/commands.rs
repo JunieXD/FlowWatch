@@ -3,7 +3,7 @@ use crate::clash_config::read_clash_config;
 use crate::cli::{
     AlertsCommand, AppArgs, AppGranularity, AppNamesCommand, AppsArgs, ChartArgs, Cli,
     Command as CliCommand, ConfigCommand, DataCommand, DataFormat, ExplainArgs, InstallArgs,
-    InvestigateCommand, QueryArgs, ReportArgs, SortBy, TimeRangeArgs,
+    InvestigateCommand, QueryArgs, ReportArgs, SortBy, TimeRangeArgs, UpdateArgs,
 };
 use crate::collector::{Collector, RuntimeSettings, acquire_lock};
 use crate::paths::{AGENT_LABEL, AppPaths};
@@ -51,7 +51,29 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         CliCommand::Uninstall(args) => uninstall(&paths, args.purge_data),
         CliCommand::Config(args) => configure(&paths, args.command),
         CliCommand::Data(args) => data(&paths, args.command),
+        CliCommand::Update(args) => update(args),
     }
+}
+
+fn update(args: UpdateArgs) -> Result<()> {
+    let result = crate::update::run(args.check, args.version.as_deref())?;
+    if result.installed {
+        println!(
+            "FlowWatch 已从 {} 更新到 {}。",
+            result.current.plain(),
+            result.target.plain()
+        );
+    } else if result.current == result.target {
+        println!("当前已是最新版本 {}。", result.current.plain());
+    } else {
+        println!(
+            "发现新版本 {}（当前 {}）。",
+            result.target.plain(),
+            result.current.plain()
+        );
+        println!("运行 flowwatch update 下载、校验并安装。");
+    }
+    Ok(())
 }
 
 fn data(paths: &AppPaths, command: DataCommand) -> Result<()> {

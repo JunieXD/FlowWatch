@@ -237,6 +237,15 @@ const DATA_AFTER_HELP: &str = "\
   flowwatch data compact
 
 导出不会覆盖已有文件。prune 会永久删除指定日期以前的流量记录，必须明确增加 --confirm。";
+const UPDATE_AFTER_HELP: &str = "\
+从 GitHub Release 下载适合当前 Mac 的正式版本，校验 SHA-256 和程序版本后再安装。
+
+示例：
+  flowwatch update --check
+  flowwatch update
+  flowwatch update --version 0.2.0
+
+更新会保留数据库和全部设置。程序不会自动降级，也不会安装预发布版本。";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -683,6 +692,19 @@ mod tests {
         assert!(help.contains("不会覆盖已有文件"));
         assert!(help.contains("必须明确增加 --confirm"));
     }
+
+    #[test]
+    fn update_command_is_explained_without_requiring_the_readme() {
+        assert!(Cli::try_parse_from(["flowwatch", "update", "--check"]).is_ok());
+        assert!(Cli::try_parse_from(["flowwatch", "update", "--version", "0.2.0"]).is_ok());
+        let error = localized_command()
+            .try_get_matches_from(["flowwatch", "help", "update"])
+            .unwrap_err();
+        let help = error.to_string();
+        assert!(help.contains("校验 SHA-256"));
+        assert!(help.contains("不会自动降级"));
+        assert!(help.contains("flowwatch update --check"));
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -738,6 +760,19 @@ pub enum Command {
     /// 查看、导出、清理和压缩本机流量数据。
     #[command(after_help = DATA_AFTER_HELP)]
     Data(DataArgs),
+    /// 检查或安装经过校验的 FlowWatch 正式版本。
+    #[command(after_help = UPDATE_AFTER_HELP)]
+    Update(UpdateArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct UpdateArgs {
+    /// 只检查版本，不下载或安装发布包。
+    #[arg(long, help_heading = "选项")]
+    pub check: bool,
+    /// 检查或安装指定正式版本，例如 0.2.0。
+    #[arg(long, value_name = "版本", help_heading = "选项")]
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Args)]

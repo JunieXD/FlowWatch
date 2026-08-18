@@ -177,6 +177,7 @@ Clash 并非必需。不开系统代理、不使用 Clash 时，标准模式仍�
 | `flowwatch doctor` | 检查数据库、采集服务、权限和登录自启状态。 |
 | `flowwatch config` | 管理应用名称、Clash 设置和应用明细精度。 |
 | `flowwatch data` | 查看数据库状态，导出、清理和压缩本机数据。 |
+| `flowwatch update` | 检查并安装经过 SHA-256 校验的正式版本。 |
 | `flowwatch install` | 安装或更新当前用户的登录自启服务。 |
 | `flowwatch uninstall` | 删除服务和程序，默认保留历史数据。 |
 
@@ -237,7 +238,17 @@ flowwatch data compact
 
 ## 升级与卸载
 
-再次执行安装命令即可升级。新版会替换程序并重启登录自启服务，同时保留 SQLite 数据库、Clash 设置、保存期限和应用明细精度。
+可以直接检查和安装 GitHub 上的最新正式版本：
+
+```sh
+flowwatch update --check
+flowwatch update
+flowwatch update --version 0.2.0
+```
+
+更新器只接受 `MAJOR.MINOR.PATCH` 正式版本，自动选择 Apple Silicon 或 Intel 发布包，同时校验发布清单中的 SHA-256 和下载后程序报告的版本。校验全部通过后才由新程序执行安装。自动更新不会降级，也不会修改 SQLite 数据库、Clash 设置、提醒、应用名称或保存期限。
+
+也可以再次执行安装脚本升级：
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/JunieXD/FlowWatch/main/scripts/install.sh | sh
