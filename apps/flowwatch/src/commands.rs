@@ -339,11 +339,21 @@ fn apps(paths: &AppPaths, args: QueryArgs) -> Result<()> {
         Vec::new()
     };
     let mut rows = Database::group_apps_for_display(rows);
+    let physical = if has_attribution_data {
+        sum_interfaces(&database.query_interfaces(range.start, range.end)?)
+    } else {
+        (0, 0)
+    };
+    let summary = AppCoverageSummary::new(&rows, physical);
     sort_apps(&mut rows, args.sort);
     rows.truncate(args.limit);
 
     if args.json {
-        let output: Vec<AppOutput<'_>> = rows.iter().map(AppOutput::from).collect();
+        let output = AppsOutput {
+            range: RangeOutput::from(&range),
+            summary,
+            apps: rows.iter().map(AppOutput::from).collect(),
+        };
         println!("{}", serde_json::to_string_pretty(&output)?);
         return Ok(());
     }
@@ -396,6 +406,8 @@ fn apps(paths: &AppPaths, args: QueryArgs) -> Result<()> {
         println!("所选时间内没有应用流量记录。");
         println!("可运行 flowwatch status 确认采集服务和数据更新时间。");
     }
+    println!();
+    print_app_coverage(&summary);
     Ok(())
 }
 
@@ -865,6 +877,104 @@ fn configure(paths: &AppPaths, command: ConfigCommand) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[derive(Serialize)]
+struct AppsOutput<'a> {
+    range: RangeOutput<'a>,
+    summary: AppCoverageSummary,
+    apps: Vec<AppOutput<'a>>,
+}
+
+#[derive(Serialize)]
+struct RangeOutput<'a> {
+    label: &'a str,
+    start: i64,
+    end: i64,
+}
+
+impl<'a> From<&'a Period> for RangeOutput<'a> {
+    fn from(value: &'a Period) -> Self {
+        Self {
+            label: &value.label,
+            start: value.start,
+            end: value.end,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+struct AppCoverageSummary {
+    actual_upload: u64,
+    actual_download: u64,
+    actual_total: u64,
+    identified_upload: u64,
+    identified_download: u64,
+    identified_total: u64,
+    unidentified_upload: u64,
+    unidentified_download: u64,
+    unidentified_total: u64,
+    coverage_percent: Option<f64>,
+    overcount: bool,
+}
+
+impl AppCoverageSummary {
+    fn new(rows: &[AppUsage], physical: (u64, u64)) -> Self {
+        let identified =
+            rows.iter()
+                .filter(|row| row.app.is_known())
+                .fold((0u64, 0u64), |total, row| {
+                    (
+                        total.0.saturating_add(row.upload()),
+                        total.1.saturating_add(row.download()),
+                    )
+                });
+        let actual_total = physical.0.saturating_add(physical.1);
+        let identified_total = identified.0.saturating_add(identified.1);
+        Self {
+            actual_upload: physical.0,
+            actual_download: physical.1,
+            actual_total,
+            identified_upload: identified.0,
+            identified_download: identified.1,
+            identified_total,
+            unidentified_upload: physical.0.saturating_sub(identified.0),
+            unidentified_download: physical.1.saturating_sub(identified.1),
+            unidentified_total: actual_total.saturating_sub(identified_total),
+            coverage_percent: (actual_total > 0)
+                .then_some(identified_total as f64 * 100.0 / actual_total as f64),
+            overcount: identified.0 > physical.0 || identified.1 > physical.1,
+        }
+    }
+}
+
+fn print_app_coverage(summary: &AppCoverageSummary) {
+    println!("所选范围汇总");
+    println!(
+        "  实际流量：上传 {}  下载 {}  合计 {}",
+        human_bytes(summary.actual_upload),
+        human_bytes(summary.actual_download),
+        human_bytes(summary.actual_total),
+    );
+    println!(
+        "  找到对应应用：上传 {}  下载 {}  合计 {}",
+        human_bytes(summary.identified_upload),
+        human_bytes(summary.identified_download),
+        human_bytes(summary.identified_total),
+    );
+    println!(
+        "  未找到对应应用：上传 {}  下载 {}  合计 {}",
+        human_bytes(summary.unidentified_upload),
+        human_bytes(summary.unidentified_download),
+        human_bytes(summary.unidentified_total),
+    );
+    match summary.coverage_percent {
+        Some(percent) => println!("  应用识别率：{percent:.1}%"),
+        None => println!("  应用识别率：暂无网卡数据"),
+    }
+    if summary.overcount {
+        println!("  数据警告：应用流量超过实际网卡流量，请运行 flowwatch doctor 检查数据。");
+    }
 }
 
 #[derive(Serialize)]
@@ -1613,6 +1723,39 @@ mod tests {
     fn reports_coverage_without_hiding_overcount() {
         assert_eq!(coverage((110, 0), (100, 0)), "识别率 110.0%");
         assert_eq!(coverage((0, 0), (0, 0)), "识别率暂无数据");
+    }
+
+    #[test]
+    fn app_coverage_uses_all_known_rows_and_preserves_overcount() {
+        let rows = vec![
+            AppUsage {
+                app: AppIdentity::process("Example", "/Applications/Example.app/Example"),
+                direct_upload: 60,
+                direct_download: 120,
+                ..AppUsage::default()
+            },
+            AppUsage {
+                app: AppIdentity::process(UNKNOWN, ""),
+                clash_upload: 500,
+                clash_download: 500,
+                ..AppUsage::default()
+            },
+        ];
+        let summary = AppCoverageSummary::new(&rows, (100, 100));
+        assert_eq!(summary.identified_total, 180);
+        assert_eq!(summary.unidentified_upload, 40);
+        assert_eq!(summary.unidentified_download, 0);
+        assert_eq!(summary.unidentified_total, 20);
+        assert_eq!(summary.coverage_percent, Some(90.0));
+        assert!(summary.overcount);
+    }
+
+    #[test]
+    fn app_coverage_does_not_invent_a_percentage_without_physical_data() {
+        let summary = AppCoverageSummary::new(&[], (0, 0));
+        assert_eq!(summary.coverage_percent, None);
+        assert_eq!(summary.unidentified_total, 0);
+        assert!(!summary.overcount);
     }
 
     #[test]
