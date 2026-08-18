@@ -37,4 +37,18 @@ git push origin v0.1.4
 4. 生成 SHA-256 校验和；
 5. 使用 `docs/releases/<标签>.md` 创建 GitHub Release。
 
+公开 tap 位于 `JunieXD/homebrew-tap`。它的定时工作流每 6 小时读取最新正式 Release 和 `SHA256SUMS`，自动更新两个架构的 Formula 并运行 style、strict audit、安装与测试。发布后可立即手动触发，避免等待下一次定时任务：
+
+```sh
+gh workflow run update-flowwatch.yml --repo JunieXD/homebrew-tap
+```
+
+确认工作流通过后，实际运行：
+
+```sh
+brew update
+brew install JunieXD/tap/flowwatch
+brew test JunieXD/tap/flowwatch
+```
+
 使用 `workflow_dispatch` 可测试两种构建任务而不创建 GitHub Release。不要替换已经发布的标签；需要修复时发布新的补丁版本。

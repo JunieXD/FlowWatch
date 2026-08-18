@@ -21,11 +21,20 @@ FlowWatch 在本机记录 Mac 的网络用量：网卡实际上传、下载多�
 
 ### 安装
 
+使用 Homebrew：
+
+```sh
+brew install JunieXD/tap/flowwatch
+flowwatch install
+```
+
+或者使用带 SHA-256 校验的安装脚本：
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/JunieXD/FlowWatch/main/scripts/install.sh | sh
 ```
 
-安装器会自动选择适合 Apple Silicon 或 Intel 的版本，校验 SHA-256，安装命令并启动登录自启服务。若 `~/.local/bin` 不在 `PATH` 中，安装器会显示需要添加的命令。
+两种方式都会自动选择适合 Apple Silicon 或 Intel 的版本。Homebrew 安装后需要运行一次 `flowwatch install` 来启动登录自启服务；脚本会直接完成这一步。若 `~/.local/bin` 不在 `PATH` 中，安装器会显示需要添加的命令。
 
 ### 确认服务状态
 
