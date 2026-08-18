@@ -1,3 +1,4 @@
+mod chart;
 mod clash_config;
 mod cli;
 mod collector;

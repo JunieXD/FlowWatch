@@ -38,12 +38,26 @@ flowwatch status
 
 ```sh
 flowwatch apps --period 今天
+flowwatch apps --date 2026-08-18
 flowwatch apps --period 24h --sort download --limit 50
 flowwatch apps --from "2026-08-18 09:00" --to "2026-08-18 18:00"
 flowwatch gaps --period 24h --limit 20
 ```
 
-`--period` 同时支持 `today`、`yesterday`、`all` 和中文别名 `今天`、`昨天`、`全部`。自定义范围时，`--from` 和 `--to` 必须同时提供；开始时间包含在内，结束时间不包含。需要供脚本处理时，查询命令可增加 `--json`；JSON 字段名保持英文。
+`--period` 同时支持 `today`、`yesterday`、`all` 和中文别名 `今天`、`昨天`、`全部`。`--date YYYY-MM-DD` 用于查询某个自然日。自定义范围时，`--from` 和 `--to` 必须同时提供；开始时间包含在内，结束时间不包含。需要供脚本处理时，查询命令可增加 `--json`；JSON 字段名保持英文。
+
+### 查看流量趋势
+
+```sh
+flowwatch chart --period 6h
+flowwatch chart --period 24h
+flowwatch chart --date 2026-08-18
+flowwatch chart --from "2026-08-18 09:00" --to "2026-08-18 18:00"
+```
+
+趋势图以网卡实际流量为准，纵轴表示每个时间段内的用量，横轴表示时间。上传、下载和合计分别使用不同颜色与符号，并在图下显示区间合计、最高流量时段和有效数据段数量。默认会根据时间跨度与终端宽度自动选择间隔；可使用 `--interval 15m`、`--height 16` 或 `--width 120` 调整，使用 `--no-color` 可生成适合保存到文本文件的输出。
+
+空白位置表示该时间段没有采集记录，不会被当作零流量连接起来。超过明细保留期限的历史数据会使用每日汇总，因此会自动切换为按天显示。
 
 不查阅 README 也可以从终端逐步了解全部功能：运行 `flowwatch --help` 查看快速开始，运行 `flowwatch <命令> --help` 查看该命令的说明、规则和示例，也可以使用 `flowwatch help <命令>`。
 
@@ -89,6 +103,7 @@ Clash 并非必需。不开系统代理、不使用 Clash 时，标准模式仍�
 | 命令 | 用途 |
 | --- | --- |
 | `flowwatch status` | 查看采集服务、实际总量、已识别应用和 Clash 状态。 |
+| `flowwatch chart` | 在终端绘制上传、下载和合计流量趋势图。 |
 | `flowwatch apps` | 按上传、下载或总量查看应用排行。 |
 | `flowwatch interfaces` | 查看各物理网卡的实际流量。 |
 | `flowwatch spikes` | 查看流量最高的分钟。 |

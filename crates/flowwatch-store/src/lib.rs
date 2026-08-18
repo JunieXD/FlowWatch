@@ -64,6 +64,14 @@ pub struct SpikeUsage {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct TrafficSample {
+    pub bucket: i64,
+    pub upload: u64,
+    pub download: u64,
+    pub interval_seconds: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct AttributionAnomaly {
     pub bucket: i64,
     pub direct_upload: u64,
@@ -567,6 +575,33 @@ impl Database {
                 download: db_u64(row.get(2)?),
             })
         })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn query_traffic_samples(&self, start: i64, end: i64) -> Result<Vec<TrafficSample>> {
+        let mut statement = self.connection.prepare(
+            "SELECT bucket, SUM(upload), SUM(download), interval_seconds
+             FROM (
+                SELECT bucket, upload, download, 60 AS interval_seconds
+                FROM interface_minute WHERE bucket >= ?1 AND bucket < ?2
+                UNION ALL
+                SELECT bucket, upload, download, 86400 AS interval_seconds
+                FROM interface_daily WHERE bucket >= ?3 AND bucket < ?4
+             )
+             GROUP BY bucket, interval_seconds
+             ORDER BY bucket",
+        )?;
+        let rows = statement.query_map(
+            params![minute_bucket(start), end, day_bucket(start), end],
+            |row| {
+                Ok(TrafficSample {
+                    bucket: row.get(0)?,
+                    upload: db_u64(row.get(1)?),
+                    download: db_u64(row.get(2)?),
+                    interval_seconds: row.get(3)?,
+                })
+            },
+        )?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -1301,7 +1336,33 @@ mod tests {
         assert_eq!(apps[0].download(), 240);
         let interfaces = database.query_interfaces(now - 60, now + 60).unwrap();
         assert_eq!(interfaces[0].upload, 180);
+        let samples = database.query_traffic_samples(now - 60, now + 60).unwrap();
+        assert_eq!(samples.len(), 1);
+        assert_eq!((samples[0].upload, samples[0].download), (180, 300));
+        assert_eq!(samples[0].interval_seconds, 60);
         assert_eq!(database.integrity_check().unwrap(), "ok");
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn traffic_samples_include_aggregated_daily_history() {
+        let (root, database) = temporary_database();
+        let day = day_bucket(Local::now().timestamp()).saturating_sub(86_400);
+        database
+            .connection
+            .execute(
+                "INSERT INTO interface_daily(bucket, interface, upload, download)
+                 VALUES (?1, 'en0', 100, 200), (?1, 'en1', 30, 40)",
+                [day],
+            )
+            .unwrap();
+        let samples = database
+            .query_traffic_samples(day, day.saturating_add(86_400))
+            .unwrap();
+        assert_eq!(samples.len(), 1);
+        assert_eq!((samples[0].upload, samples[0].download), (130, 240));
+        assert_eq!(samples[0].interval_seconds, 86_400);
         drop(database);
         std::fs::remove_dir_all(root).unwrap();
     }

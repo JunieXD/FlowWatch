@@ -1,11 +1,13 @@
+use crate::chart as terminal_chart;
 use crate::clash_config::read_clash_config;
 use crate::cli::{
-    AppGranularity, Cli, Command as CliCommand, ConfigCommand, InstallArgs, QueryArgs, SortBy,
+    AppGranularity, ChartArgs, Cli, Command as CliCommand, ConfigCommand, InstallArgs, QueryArgs,
+    SortBy, TimeRangeArgs,
 };
 use crate::collector::{Collector, RuntimeSettings, acquire_lock};
 use crate::paths::{AGENT_LABEL, AppPaths};
 use anyhow::{Context, Result, bail};
-use chrono::{DateTime, Local, LocalResult, NaiveDateTime, TimeZone};
+use chrono::{DateTime, Local, LocalResult, NaiveDate, NaiveDateTime, TimeZone};
 use flowwatch_clash::ClashSampler;
 use flowwatch_core::{AppIdentity, TrafficBackend, UNKNOWN};
 use flowwatch_macos::MacOsBackend;
@@ -18,6 +20,7 @@ use signal_hook::consts::{SIGINT, SIGTERM};
 use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::fs;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -31,6 +34,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
         CliCommand::Collect(args) => collect(&paths, args.run_seconds),
         CliCommand::Status => status(&paths),
+        CliCommand::Chart(args) => chart(&paths, args),
         CliCommand::Apps(args) => apps(&paths, args),
         CliCommand::Interfaces(args) => interfaces(&paths, args),
         CliCommand::Spikes(args) => spikes(&paths, args),
@@ -40,6 +44,80 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         CliCommand::Uninstall(args) => uninstall(&paths, args.purge_data),
         CliCommand::Config(args) => configure(&paths, args.command),
     }
+}
+
+fn chart(paths: &AppPaths, args: ChartArgs) -> Result<()> {
+    validate_time_range(&args.range)?;
+    let range = parse_time_range(&args.range)?;
+    let database = Database::open(&paths.database)?;
+    let samples = database.query_traffic_samples(range.start, range.end)?;
+    if samples.is_empty() {
+        println!("流量趋势（{}）", range.label);
+        println!("所选时间内没有网卡流量记录。");
+        println!("可运行 flowwatch status 确认采集服务和数据更新时间。");
+        return Ok(());
+    }
+
+    let total_width = args.width.unwrap_or_else(terminal_width).clamp(50, 240);
+    let plot_width = total_width.saturating_sub(11);
+    let chart = terminal_chart::prepare_chart(
+        &samples,
+        range.start,
+        range.end,
+        args.interval.seconds(),
+        plot_width,
+    )?;
+    let color =
+        !args.no_color && std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal();
+    let interval = terminal_chart::interval_label(chart.interval_seconds);
+
+    println!("流量趋势（{}）", range.label);
+    println!("纵轴：每 {interval}的用量；横轴：时间");
+    if chart.adjusted_for_daily_data {
+        println!("说明：所选范围含每日汇总，间隔已自动调整为每 {interval}一个点。");
+    } else if samples
+        .iter()
+        .any(|sample| sample.interval_seconds >= 86_400)
+    {
+        println!("说明：较早的记录只保留每日汇总，因此按自然日显示。");
+    }
+    println!(
+        "{}",
+        terminal_chart::render_chart(&chart, args.height, plot_width, color)
+    );
+    println!("图例：{}", terminal_chart::legend(color));
+    let (upload, download) = chart.totals();
+    println!(
+        "区间合计：上传 {}  下载 {}  合计 {}",
+        human_bytes(upload),
+        human_bytes(download),
+        human_bytes(upload.saturating_add(download)),
+    );
+    if let Some(peak) = chart.peak() {
+        println!(
+            "最高时段：{} 起，合计 {}",
+            format_timestamp(peak.bucket),
+            human_bytes(peak.total().unwrap_or_default()),
+        );
+    }
+    println!(
+        "数据时间段：{}/{}（空白表示没有采集记录）",
+        chart.observed_count(),
+        chart.points.len(),
+    );
+    let now = Local::now().timestamp();
+    if range.end > now
+        && chart
+            .points
+            .last()
+            .is_some_and(|point| point.bucket.saturating_add(chart.interval_seconds) > now)
+    {
+        println!("说明：最后一个时间段尚未结束，其数值会继续增长。");
+    }
+    if range.exact {
+        println!("说明：统计按保存间隔聚合，边界与记录相交时会包含完整记录。");
+    }
+    Ok(())
 }
 
 fn collect(paths: &AppPaths, run_seconds: u64) -> Result<()> {
@@ -848,6 +926,13 @@ fn parse_period(raw: &str) -> Result<Period> {
 }
 
 fn parse_query_range(args: &QueryArgs) -> Result<Period> {
+    parse_time_range(&args.range)
+}
+
+fn parse_time_range(args: &TimeRangeArgs) -> Result<Period> {
+    if let Some(date) = &args.date {
+        return parse_date_range(date);
+    }
     match (&args.from, &args.to) {
         (Some(from), Some(to)) => parse_exact_range(from, to),
         (None, None) => parse_period(&args.period),
@@ -859,10 +944,30 @@ fn validate_query_args(args: &QueryArgs) -> Result<()> {
     if !(1..=10_000).contains(&args.limit) {
         bail!("--limit 必须在 1 到 10000 之间");
     }
+    validate_time_range(&args.range)
+}
+
+fn validate_time_range(args: &TimeRangeArgs) -> Result<()> {
     if args.from.is_some() != args.to.is_some() {
         bail!("--from 和 --to 必须同时提供");
     }
     Ok(())
+}
+
+fn parse_date_range(raw: &str) -> Result<Period> {
+    let value = raw.trim();
+    let Ok(date) = NaiveDate::parse_from_str(value, "%Y-%m-%d") else {
+        bail!("日期格式无效，请使用 YYYY-MM-DD");
+    };
+    let next_date = date.succ_opt().context("日期超出支持范围")?;
+    let start = parse_query_timestamp(&format!("{date} 00:00"))?;
+    let end = parse_query_timestamp(&format!("{next_date} 00:00"))?;
+    Ok(Period {
+        start,
+        end,
+        label: date.format("%Y-%m-%d").to_string(),
+        exact: true,
+    })
 }
 
 fn parse_exact_range(from: &str, to: &str) -> Result<Period> {
@@ -1077,6 +1182,29 @@ fn human_bytes(bytes: u64) -> String {
     } else {
         format!("{value:.1} {}", UNITS[unit])
     }
+}
+
+fn terminal_width() -> usize {
+    #[cfg(unix)]
+    {
+        let mut size = libc::winsize {
+            ws_row: 0,
+            ws_col: 0,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        // SAFETY: ioctl only writes the provided winsize structure for stdout.
+        if unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut size) } == 0
+            && size.ws_col > 0
+        {
+            return usize::from(size.ws_col).clamp(50, 160);
+        }
+    }
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(100)
+        .clamp(50, 160)
 }
 
 fn table_left(value: &str, width: usize) -> String {
@@ -1412,6 +1540,12 @@ mod tests {
 
         let local = parse_query_timestamp("2026-08-18 10:00").unwrap();
         assert_eq!(format_timestamp(local), "2026-08-18 10:00");
+
+        let day = parse_date_range("2026-08-18").unwrap();
+        assert_eq!(day.label, "2026-08-18");
+        assert_eq!(format_timestamp(day.start), "2026-08-18 00:00");
+        assert_eq!(format_timestamp(day.end), "2026-08-19 00:00");
+        assert!(parse_date_range("2026/08/18").is_err());
     }
 
     #[test]
@@ -1438,6 +1572,18 @@ mod tests {
                 "2026-08-18 10:00",
                 "--to",
                 "2026-08-18 11:00",
+            ])
+            .is_err()
+        );
+        assert!(Cli::try_parse_from(["flowwatch", "apps", "--date", "2026-08-18",]).is_ok());
+        assert!(
+            Cli::try_parse_from([
+                "flowwatch",
+                "chart",
+                "--date",
+                "2026-08-18",
+                "--period",
+                "6h",
             ])
             .is_err()
         );

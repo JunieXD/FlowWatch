@@ -14,7 +14,7 @@ cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo test --locked --workspace
 cargo build --locked --release --workspace
-scripts/check-release.sh v0.1.3 target/release/flowwatch
+scripts/check-release.sh v0.1.4 target/release/flowwatch
 scripts/test-installer.sh
 ```
 
@@ -25,8 +25,8 @@ scripts/test-installer.sh
 创建与 Cargo 版本完全一致的带说明标签并推送：
 
 ```sh
-git tag -a v0.1.3 -m "FlowWatch v0.1.3"
-git push origin v0.1.3
+git tag -a v0.1.4 -m "FlowWatch v0.1.4"
+git push origin v0.1.4
 ```
 
 发布工作流随后会：

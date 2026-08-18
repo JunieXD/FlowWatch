@@ -15,8 +15,11 @@ const ROOT_AFTER_HELP: &str = "\
   flowwatch doctor               检查采集是否正常
   flowwatch status               查看今天的流量概况
   flowwatch apps                 查看今天的应用流量排行
+  flowwatch chart --period 24h   查看过去 24 小时的流量趋势
 
 常见查询：
+  flowwatch chart --period 6h
+  flowwatch chart --date 2026-08-18
   flowwatch apps --period 24h --sort download --limit 10
   flowwatch apps --from \"2026-08-18 09:00\" --to \"2026-08-18 18:00\"
   flowwatch spikes --period 7d
@@ -35,20 +38,37 @@ const COLLECT_AFTER_HELP: &str = "\
 const STATUS_AFTER_HELP: &str = "\
 说明：
   此命令固定显示今天的概况，不接受时间范围参数。
-  查看其他时间请使用 apps、interfaces、spikes 或 gaps。
+  查看其他时间请使用 chart、apps、interfaces、spikes 或 gaps。
 
 示例：
   flowwatch status
   flowwatch apps --period 昨天";
+const CHART_AFTER_HELP: &str = "\
+说明：
+  纵轴表示每个时间段内使用的流量，不是累计值；横轴表示时间。
+  默认根据时间跨度和终端宽度自动选择间隔，上传、下载和合计使用不同颜色与符号。
+
+示例：
+  flowwatch chart --period 6h
+  flowwatch chart --period 24h
+  flowwatch chart --date 2026-08-18
+  flowwatch chart --from \"2026-08-18 09:00\" --to \"2026-08-18 18:00\"
+  flowwatch chart --period 24h --interval 15m --height 16 --width 120
+
+时间范围：
+  --date 用于查看某个自然日；--from 和 --to 用于任意起止时间。
+  --period、--date 和 --from/--to 三种写法不能同时使用。";
 const APPS_AFTER_HELP: &str = "\
 示例：
   flowwatch apps
   flowwatch apps --period 昨天
+  flowwatch apps --date 2026-08-18
   flowwatch apps --period 24h --sort download --limit 10
   flowwatch apps --from \"2026-08-18 09:00\" --to \"2026-08-18 18:00\"
 
 自定义时间说明：
-  --from 和 --to 必须一起使用，且不能同时使用 --period。
+  --date 可查看某个自然日；--from 和 --to 必须一起使用。
+  --period、--date 和 --from/--to 三种写法不能同时使用。
   开始时间包含在结果内，结束时间不包含在结果内。
   本地时间格式为 YYYY-MM-DD HH:MM[:SS]；也支持 Unix 时间戳和 RFC 3339。";
 const INTERFACES_AFTER_HELP: &str = "\
@@ -58,7 +78,8 @@ const INTERFACES_AFTER_HELP: &str = "\
   flowwatch interfaces --from \"2026-08-18 09:00\" --to \"2026-08-18 18:00\"
 
 自定义时间说明：
-  --from 和 --to 必须一起使用，且不能同时使用 --period。
+  --date 可查看某个自然日；--from 和 --to 必须一起使用。
+  --period、--date 和 --from/--to 三种写法不能同时使用。
   开始时间包含在结果内，结束时间不包含在结果内。
   本地时间格式为 YYYY-MM-DD HH:MM[:SS]；也支持 Unix 时间戳和 RFC 3339。";
 const SPIKES_AFTER_HELP: &str = "\
@@ -68,7 +89,8 @@ const SPIKES_AFTER_HELP: &str = "\
   flowwatch spikes --from \"2026-08-18 09:00\" --to \"2026-08-18 18:00\"
 
 自定义时间说明：
-  --from 和 --to 必须一起使用，且不能同时使用 --period。
+  --date 可查看某个自然日；--from 和 --to 必须一起使用。
+  --period、--date 和 --from/--to 三种写法不能同时使用。
   开始时间包含在结果内，结束时间不包含在结果内。
   本地时间格式为 YYYY-MM-DD HH:MM[:SS]；也支持 Unix 时间戳和 RFC 3339。";
 const GAPS_AFTER_HELP: &str = "\
@@ -81,7 +103,8 @@ const GAPS_AFTER_HELP: &str = "\
   flowwatch gaps --from \"2026-08-18 09:00\" --to \"2026-08-18 18:00\"
 
 自定义时间说明：
-  --from 和 --to 必须一起使用，且不能同时使用 --period。
+  --date 可查看某个自然日；--from 和 --to 必须一起使用。
+  --period、--date 和 --from/--to 三种写法不能同时使用。
   开始时间包含在结果内，结束时间不包含在结果内。
   本地时间格式为 YYYY-MM-DD HH:MM[:SS]；也支持 Unix 时间戳和 RFC 3339。";
 const DOCTOR_AFTER_HELP: &str = "\
@@ -207,6 +230,7 @@ fn localized_error_message(error: &clap::Error) -> String {
     let invalid_subcommand = value(ContextKind::InvalidSubcommand);
     let prior_arg = value(ContextKind::PriorArg);
     let valid_values = value(ContextKind::ValidValue).map(|values| values.replace(", ", "、"));
+    let validation_error = std::error::Error::source(error).map(ToString::to_string);
 
     let message = match error.kind() {
         ErrorKind::UnknownArgument => invalid_arg.as_deref().map_or_else(
@@ -217,7 +241,12 @@ fn localized_error_message(error: &clap::Error) -> String {
             || "无法识别这个命令。".to_string(),
             |command| format!("无法识别命令“{command}”。"),
         ),
-        ErrorKind::InvalidValue | ErrorKind::ValueValidation => match (
+        ErrorKind::ValueValidation => match (invalid_arg.as_deref(), validation_error.as_deref()) {
+            (Some(arg), Some(detail)) => format!("参数“{arg}”无效：{detail}。"),
+            (_, Some(detail)) => format!("参数值无效：{detail}。"),
+            _ => "参数值无效。".to_string(),
+        },
+        ErrorKind::InvalidValue => match (
             invalid_arg.as_deref(),
             invalid_value.as_deref(),
             valid_values.as_deref(),
@@ -366,6 +395,27 @@ mod tests {
         let message = localized_error_message(&error);
         assert!(message.contains("参数“--period <时间范围>”缺少值"));
     }
+
+    #[test]
+    fn chart_help_explains_dates_intervals_and_visual_controls() {
+        let error = localized_command()
+            .try_get_matches_from(["flowwatch", "help", "chart"])
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::DisplayHelp);
+        let help = error.to_string();
+        assert!(help.contains("flowwatch chart --date 2026-08-18"));
+        assert!(help.contains("--interval <间隔>"));
+        assert!(help.contains("--no-color"));
+    }
+
+    #[test]
+    fn chart_dimensions_are_validated_during_argument_parsing() {
+        let error = localized_command()
+            .try_get_matches_from(["flowwatch", "chart", "--width", "49"])
+            .unwrap_err();
+        let message = localized_error_message(&error);
+        assert!(message.contains("图表宽度必须在 50 到 240 之间"));
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -376,6 +426,9 @@ pub enum Command {
     /// 查看采集服务状态、实际总量和应用识别率。
     #[command(after_help = STATUS_AFTER_HELP)]
     Status,
+    /// 在终端中绘制上传、下载和合计流量趋势图。
+    #[command(after_help = CHART_AFTER_HELP)]
+    Chart(ChartArgs),
     /// 按上传、下载或总量查看应用排行。
     #[command(after_help = APPS_AFTER_HELP)]
     Apps(QueryArgs),
@@ -410,25 +463,52 @@ pub struct CollectArgs {
 }
 
 #[derive(Debug, Clone, Args)]
-pub struct QueryArgs {
+pub struct TimeRangeArgs {
     /// 时间范围；默认 today（今天）。也可用 yesterday（昨天）、all（全部）、24h、7d、30d 等。
     #[arg(
         long,
         value_name = "时间范围",
         default_value = "today",
         hide_default_value = true,
-        conflicts_with_all = ["from", "to"],
+        conflicts_with_all = ["date", "from", "to"],
         help_heading = "选项"
     )]
     pub period: String,
 
+    /// 查看某个自然日，格式为 YYYY-MM-DD。
+    #[arg(
+        long,
+        value_name = "日期",
+        conflicts_with_all = ["from", "to"],
+        help_heading = "选项"
+    )]
+    pub date: Option<String>,
+
     /// 自定义开始时间，包含该时间点；必须和 --to 一起使用。
-    #[arg(long, value_name = "时间", requires = "to", help_heading = "选项")]
+    #[arg(
+        long,
+        value_name = "时间",
+        requires = "to",
+        conflicts_with = "date",
+        help_heading = "选项"
+    )]
     pub from: Option<String>,
 
     /// 自定义结束时间，不包含该时间点；必须和 --from 一起使用。
-    #[arg(long, value_name = "时间", requires = "from", help_heading = "选项")]
+    #[arg(
+        long,
+        value_name = "时间",
+        requires = "from",
+        conflicts_with = "date",
+        help_heading = "选项"
+    )]
     pub to: Option<String>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct QueryArgs {
+    #[command(flatten)]
+    pub range: TimeRangeArgs,
 
     /// 排序方式：upload（上传）、download（下载）或 total（合计）；默认按合计排序。
     #[arg(
@@ -455,6 +535,126 @@ pub struct QueryArgs {
     /// 输出 JSON，字段名保持英文。
     #[arg(long, help_heading = "选项")]
     pub json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ChartArgs {
+    #[command(flatten)]
+    pub range: TimeRangeArgs,
+
+    /// 每个点代表的时间；默认自动。可用 1m、5m、10m、15m、30m、1h、3h、6h、12h、1d、7d、30d、90d 或 365d。
+    #[arg(
+        long,
+        value_enum,
+        value_name = "间隔",
+        default_value_t = ChartInterval::Auto,
+        hide_default_value = true,
+        hide_possible_values = true,
+        help_heading = "选项"
+    )]
+    pub interval: ChartInterval,
+
+    /// 图表高度；默认 12 行，可设置 6 到 30 行。
+    #[arg(
+        long,
+        value_name = "行数",
+        default_value_t = 12,
+        hide_default_value = true,
+        value_parser = parse_chart_height,
+        help_heading = "选项"
+    )]
+    pub height: usize,
+
+    /// 图表总宽度；默认跟随终端，可设置 50 到 240 列。
+    #[arg(
+        long,
+        value_name = "列数",
+        value_parser = parse_chart_width,
+        help_heading = "选项"
+    )]
+    pub width: Option<usize>,
+
+    /// 不使用 ANSI 颜色，适合保存到文件或不支持颜色的终端。
+    #[arg(long, help_heading = "选项")]
+    pub no_color: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ChartInterval {
+    Auto,
+    #[value(name = "1m")]
+    OneMinute,
+    #[value(name = "5m")]
+    FiveMinutes,
+    #[value(name = "10m")]
+    TenMinutes,
+    #[value(name = "15m")]
+    FifteenMinutes,
+    #[value(name = "30m")]
+    ThirtyMinutes,
+    #[value(name = "1h")]
+    OneHour,
+    #[value(name = "3h")]
+    ThreeHours,
+    #[value(name = "6h")]
+    SixHours,
+    #[value(name = "12h")]
+    TwelveHours,
+    #[value(name = "1d")]
+    OneDay,
+    #[value(name = "7d")]
+    SevenDays,
+    #[value(name = "30d")]
+    ThirtyDays,
+    #[value(name = "90d")]
+    NinetyDays,
+    #[value(name = "365d")]
+    OneYear,
+}
+
+impl ChartInterval {
+    pub const fn seconds(self) -> Option<i64> {
+        match self {
+            Self::Auto => None,
+            Self::OneMinute => Some(60),
+            Self::FiveMinutes => Some(300),
+            Self::TenMinutes => Some(600),
+            Self::FifteenMinutes => Some(900),
+            Self::ThirtyMinutes => Some(1_800),
+            Self::OneHour => Some(3_600),
+            Self::ThreeHours => Some(10_800),
+            Self::SixHours => Some(21_600),
+            Self::TwelveHours => Some(43_200),
+            Self::OneDay => Some(86_400),
+            Self::SevenDays => Some(604_800),
+            Self::ThirtyDays => Some(2_592_000),
+            Self::NinetyDays => Some(7_776_000),
+            Self::OneYear => Some(31_536_000),
+        }
+    }
+}
+
+fn parse_chart_height(raw: &str) -> Result<usize, String> {
+    parse_bounded_usize(raw, 6, 30, "图表高度")
+}
+
+fn parse_chart_width(raw: &str) -> Result<usize, String> {
+    parse_bounded_usize(raw, 50, 240, "图表宽度")
+}
+
+fn parse_bounded_usize(
+    raw: &str,
+    minimum: usize,
+    maximum: usize,
+    label: &str,
+) -> Result<usize, String> {
+    let value = raw
+        .parse::<usize>()
+        .map_err(|_| format!("{label}必须是整数"))?;
+    if !(minimum..=maximum).contains(&value) {
+        return Err(format!("{label}必须在 {minimum} 到 {maximum} 之间"));
+    }
+    Ok(value)
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
