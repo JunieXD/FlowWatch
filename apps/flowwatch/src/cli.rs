@@ -225,6 +225,18 @@ const APP_NAMES_AFTER_HELP: &str = "\
   flowwatch config app-names set \"bundle:com.example.App\" \"工作浏览器\"
   flowwatch config app-names set \"group:chrome-headless-shell:chrome-headless-shell\" \"自动化浏览器\"
   flowwatch config app-names remove \"bundle:com.example.App\"";
+const DATA_AFTER_HELP: &str = "\
+查看、导出和维护本机 SQLite 流量数据。
+
+示例：
+  flowwatch data info
+  flowwatch data export --period 30d --format csv --output flowwatch.csv
+  flowwatch data export --date 2026-08-18 --format json --output flowwatch.json
+  flowwatch data retention --details 30d --daily 365d
+  flowwatch data prune --before 2026-01-01 --confirm
+  flowwatch data compact
+
+导出不会覆盖已有文件。prune 会永久删除指定日期以前的流量记录，必须明确增加 --confirm。";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -631,6 +643,46 @@ mod tests {
         assert!(help.contains("flowwatch apps --details"));
         assert!(help.contains("group:chrome-headless-shell"));
     }
+
+    #[test]
+    fn data_commands_explain_safety_and_validate_retention() {
+        assert_eq!(parse_detail_retention("30d").unwrap(), 30);
+        assert_eq!(parse_daily_retention("365d").unwrap(), 365);
+        assert!(parse_detail_retention("0d").is_err());
+        assert!(parse_daily_retention("30").is_err());
+        assert!(
+            Cli::try_parse_from([
+                "flowwatch",
+                "data",
+                "export",
+                "--period",
+                "30d",
+                "--format",
+                "csv",
+                "--output",
+                "flowwatch.csv",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "flowwatch",
+                "data",
+                "retention",
+                "--details",
+                "30d",
+                "--daily",
+                "365d",
+            ])
+            .is_ok()
+        );
+        let error = localized_command()
+            .try_get_matches_from(["flowwatch", "help", "data"])
+            .unwrap_err();
+        let help = error.to_string();
+        assert!(help.contains("不会覆盖已有文件"));
+        assert!(help.contains("必须明确增加 --confirm"));
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -683,6 +735,9 @@ pub enum Command {
     /// 管理可选的流量来源。
     #[command(after_help = CONFIG_AFTER_HELP)]
     Config(ConfigArgs),
+    /// 查看、导出、清理和压缩本机流量数据。
+    #[command(after_help = DATA_AFTER_HELP)]
+    Data(DataArgs),
 }
 
 #[derive(Debug, Args)]
@@ -1258,4 +1313,75 @@ pub enum AppNamesCommand {
         #[arg(value_name = "应用ID", help_heading = "参数")]
         app_id: String,
     },
+}
+
+#[derive(Debug, Args)]
+pub struct DataArgs {
+    #[command(subcommand)]
+    pub command: DataCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DataCommand {
+    /// 查看数据库位置、大小、保留期限和记录范围。
+    Info,
+    /// 将所选范围导出为 CSV 或 JSON 文件。
+    Export {
+        #[command(flatten)]
+        range: TimeRangeArgs,
+        /// 导出格式：csv 或 json。
+        #[arg(long, value_enum, value_name = "格式", help_heading = "选项")]
+        format: DataFormat,
+        /// 输出文件；为避免误操作，不会覆盖已有文件。
+        #[arg(long, value_name = "文件", help_heading = "选项")]
+        output: PathBuf,
+    },
+    /// 修改明细和每日汇总的保存时间，并立即应用。
+    Retention {
+        /// 明细保存时间，例如 30d；范围 1d 到 365d。
+        #[arg(long, value_name = "天数", value_parser = parse_detail_retention, help_heading = "选项")]
+        details: Option<i64>,
+        /// 每日汇总保存时间，例如 365d；范围 7d 到 3650d。
+        #[arg(long, value_name = "天数", value_parser = parse_daily_retention, help_heading = "选项")]
+        daily: Option<i64>,
+    },
+    /// 永久删除指定日期以前的流量记录。
+    Prune {
+        /// 删除这个本地自然日以前的记录，格式为 YYYY-MM-DD。
+        #[arg(long, value_name = "日期", help_heading = "选项")]
+        before: String,
+        /// 确认永久删除；缺少时只显示将要执行的操作。
+        #[arg(long, help_heading = "选项")]
+        confirm: bool,
+    },
+    /// 回收已删除记录占用的空间并优化数据库。
+    Compact,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum DataFormat {
+    Csv,
+    Json,
+}
+
+fn parse_detail_retention(raw: &str) -> Result<i64, String> {
+    parse_retention_days(raw, 1, 365, "明细保存时间")
+}
+
+fn parse_daily_retention(raw: &str) -> Result<i64, String> {
+    parse_retention_days(raw, 7, 3_650, "每日汇总保存时间")
+}
+
+fn parse_retention_days(raw: &str, minimum: i64, maximum: i64, label: &str) -> Result<i64, String> {
+    let value = raw
+        .trim()
+        .to_ascii_lowercase()
+        .strip_suffix('d')
+        .ok_or_else(|| format!("{label}必须使用 d（天），例如 30d"))?
+        .parse::<i64>()
+        .map_err(|_| format!("{label}必须是整数天数，例如 30d"))?;
+    if !(minimum..=maximum).contains(&value) {
+        return Err(format!("{label}必须在 {minimum}d 到 {maximum}d 之间"));
+    }
+    Ok(value)
 }

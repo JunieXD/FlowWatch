@@ -176,6 +176,7 @@ Clash 并非必需。不开系统代理、不使用 Clash 时，标准模式仍�
 | `flowwatch gaps` | 查看未识别流量较高的时间段。 |
 | `flowwatch doctor` | 检查数据库、采集服务、权限和登录自启状态。 |
 | `flowwatch config` | 管理应用名称、Clash 设置和应用明细精度。 |
+| `flowwatch data` | 查看数据库状态，导出、清理和压缩本机数据。 |
 | `flowwatch install` | 安装或更新当前用户的登录自启服务。 |
 | `flowwatch uninstall` | 删除服务和程序，默认保留历史数据。 |
 
@@ -206,6 +207,31 @@ flowwatch config set-app-granularity 5m
 ```
 
 默认保留 30 天应用和分钟明细、365 天每日汇总。FlowWatch 不持久化原始数据包、包内容、远端域名、远端 IP、本地端口、原始 `nettop` 输出或原始 Clash 响应；本机连接和应用的短期匹配只保存在内存中。项目没有遥测、账号或云端服务。
+
+查看数据库大小、记录范围和保存期限：
+
+```sh
+flowwatch data info
+```
+
+导出 CSV 或 JSON：
+
+```sh
+flowwatch data export --period 30d --format csv --output flowwatch.csv
+flowwatch data export --date 2026-08-18 --format json --output flowwatch.json
+```
+
+导出内容包括网卡实际流量时间序列、各网卡汇总、应用分来源用量和必要的时间字段，不会包含 FlowWatch 本来就不保存的远端信息。输出使用同目录临时文件完成后再原子写入，并拒绝覆盖已有文件。
+
+修改保存期限或清理旧数据：
+
+```sh
+flowwatch data retention --details 30d --daily 365d
+flowwatch data prune --before 2026-01-01 --confirm
+flowwatch data compact
+```
+
+`retention` 会立即汇总和应用新期限。`prune` 只有明确增加 `--confirm` 才会永久删除指定日期以前的记录；`compact` 可在删除后回收 SQLite 文件空间。
 
 导入 Clash 后，控制器密钥按当前设计以明文保存在 SQLite 中。数据目录权限为 `0700`，数据库文件权限为 `0600`，普通命令输出会隐藏密钥。仅接受本机 HTTP 控制器。
 

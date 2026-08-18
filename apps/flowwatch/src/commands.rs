@@ -2,8 +2,8 @@ use crate::chart as terminal_chart;
 use crate::clash_config::read_clash_config;
 use crate::cli::{
     AlertsCommand, AppArgs, AppGranularity, AppNamesCommand, AppsArgs, ChartArgs, Cli,
-    Command as CliCommand, ConfigCommand, ExplainArgs, InstallArgs, InvestigateCommand, QueryArgs,
-    ReportArgs, SortBy, TimeRangeArgs,
+    Command as CliCommand, ConfigCommand, DataCommand, DataFormat, ExplainArgs, InstallArgs,
+    InvestigateCommand, QueryArgs, ReportArgs, SortBy, TimeRangeArgs,
 };
 use crate::collector::{Collector, RuntimeSettings, acquire_lock};
 use crate::paths::{AGENT_LABEL, AppPaths};
@@ -21,8 +21,8 @@ use serde::Serialize;
 use signal_hook::consts::{SIGINT, SIGTERM};
 use std::cmp::Reverse;
 use std::collections::HashMap;
-use std::fs;
-use std::io::IsTerminal;
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufWriter, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -50,7 +50,320 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         CliCommand::Install(args) => install(&paths, args),
         CliCommand::Uninstall(args) => uninstall(&paths, args.purge_data),
         CliCommand::Config(args) => configure(&paths, args.command),
+        CliCommand::Data(args) => data(&paths, args.command),
     }
+}
+
+fn data(paths: &AppPaths, command: DataCommand) -> Result<()> {
+    let mut database = Database::open(&paths.database)?;
+    match command {
+        DataCommand::Info => {
+            println!("FlowWatch 数据");
+            println!("  数据库：{}", paths.database.display());
+            println!("  占用空间：{}", human_bytes(database.size_bytes()));
+            println!(
+                "  明细保存：{} 天",
+                database.setting("detail_days")?.as_deref().unwrap_or("30")
+            );
+            println!(
+                "  每日汇总保存：{} 天",
+                database.setting("daily_days")?.as_deref().unwrap_or("365")
+            );
+            match database.traffic_bounds()? {
+                Some((oldest, newest)) => {
+                    println!("  最早记录：{}", format_timestamp(oldest));
+                    println!("  最新记录：{}", format_timestamp(newest));
+                }
+                None => println!("  记录范围：还没有流量数据"),
+            }
+            let counts = database.traffic_row_counts()?;
+            let detail_rows = [
+                "app_usage_1m",
+                "app_usage_5m",
+                "interface_minute",
+                "proxy_minute",
+            ]
+            .iter()
+            .filter_map(|table| counts.get(*table))
+            .copied()
+            .sum::<u64>();
+            let daily_rows = ["app_usage_daily", "interface_daily", "proxy_daily"]
+                .iter()
+                .filter_map(|table| counts.get(*table))
+                .copied()
+                .sum::<u64>();
+            println!("  明细记录：{detail_rows} 行");
+            println!("  每日汇总：{daily_rows} 行");
+            println!("  完整性：{}", database.integrity_check()?);
+        }
+        DataCommand::Export {
+            range,
+            format,
+            output,
+        } => {
+            validate_time_range(&range)?;
+            let range = parse_time_range(&range)?;
+            let traffic = database.query_traffic_samples(range.start, range.end)?;
+            let interfaces = database.query_interfaces(range.start, range.end)?;
+            let apps = database.query_display_apps(range.start, range.end)?;
+            match format {
+                DataFormat::Json => write_atomic_new(&output, |file| {
+                    let mut writer = BufWriter::new(file);
+                    serde_json::to_writer_pretty(
+                        &mut writer,
+                        &DataExport {
+                            generated_at: Local::now().timestamp(),
+                            range_start: range.start,
+                            range_end: range.end,
+                            range_label: &range.label,
+                            traffic: &traffic,
+                            interfaces: &interfaces,
+                            apps: &apps,
+                        },
+                    )?;
+                    writer.write_all(b"\n")?;
+                    writer.flush()?;
+                    Ok(())
+                })?,
+                DataFormat::Csv => write_atomic_new(&output, |file| {
+                    write_export_csv(file, &range, &traffic, &interfaces, &apps)
+                })?,
+            }
+            println!("已导出到 {}。", output.display());
+            println!(
+                "内容：{} 个流量时间段、{} 个网卡汇总、{} 个应用。",
+                traffic.len(),
+                interfaces.len(),
+                apps.len()
+            );
+        }
+        DataCommand::Retention { details, daily } => {
+            if details.is_none() && daily.is_none() {
+                bail!("请至少指定 --details 或 --daily；例如 --details 30d --daily 365d");
+            }
+            let details = details.unwrap_or(parse_i64_setting(&database, "detail_days", 30)?);
+            let daily = daily.unwrap_or(parse_i64_setting(&database, "daily_days", 365)?);
+            if daily < details {
+                bail!("每日汇总保存时间不能短于明细保存时间");
+            }
+            database.maintenance(Local::now().timestamp(), details, daily)?;
+            database.set_setting("detail_days", &details.to_string())?;
+            database.set_setting("daily_days", &daily.to_string())?;
+            println!("保存期限已更新并应用：明细 {details} 天，每日汇总 {daily} 天。");
+        }
+        DataCommand::Prune { before, confirm } => {
+            let range = parse_date_range(&before)?;
+            if !confirm {
+                println!("尚未删除数据。此操作会永久删除 {} 以前的流量记录。", before);
+                println!(
+                    "确认无误后运行：flowwatch data prune --before {} --confirm",
+                    before
+                );
+                return Ok(());
+            }
+            let summary = database.prune_before(range.start)?;
+            println!("已删除 {} 以前的 {} 行记录。", before, summary.total_rows());
+            println!(
+                "其中应用 {} 行、网卡 {} 行、Clash {} 行、旧提醒记录 {} 行。",
+                summary.app_rows, summary.interface_rows, summary.proxy_rows, summary.alert_events
+            );
+            println!("可运行 flowwatch data compact 回收文件空间。");
+        }
+        DataCommand::Compact => {
+            let (before, after) = database.compact()?;
+            println!(
+                "数据库压缩完成：{} -> {}。",
+                human_bytes(before),
+                human_bytes(after)
+            );
+        }
+    }
+    Ok(())
+}
+
+fn parse_i64_setting(database: &Database, key: &str, default: i64) -> Result<i64> {
+    database.setting(key)?.map_or(Ok(default), |value| {
+        value
+            .parse::<i64>()
+            .with_context(|| format!("设置 {key} 不是有效整数"))
+    })
+}
+
+#[derive(Serialize)]
+struct DataExport<'a> {
+    generated_at: i64,
+    range_start: i64,
+    range_end: i64,
+    range_label: &'a str,
+    traffic: &'a [TrafficSample],
+    interfaces: &'a [InterfaceUsage],
+    apps: &'a [AppUsage],
+}
+
+#[derive(Serialize)]
+struct CsvExportRow<'a> {
+    record_type: &'a str,
+    range_start: i64,
+    range_end: i64,
+    bucket: Option<i64>,
+    interval_seconds: Option<i64>,
+    interface: &'a str,
+    app_id: &'a str,
+    app_name: &'a str,
+    source: &'a str,
+    upload: u64,
+    download: u64,
+    direct_upload: u64,
+    direct_download: u64,
+    clash_upload: u64,
+    clash_download: u64,
+    enhanced_upload: u64,
+    enhanced_download: u64,
+    connections: u64,
+    first_seen: Option<i64>,
+    last_seen: Option<i64>,
+    identity_ids: String,
+    executable_paths: String,
+}
+
+fn write_export_csv<W: Write>(
+    file: W,
+    range: &Period,
+    traffic: &[TrafficSample],
+    interfaces: &[InterfaceUsage],
+    apps: &[AppUsage],
+) -> Result<()> {
+    let mut writer = csv::WriterBuilder::new().from_writer(file);
+    for sample in traffic {
+        writer.serialize(CsvExportRow {
+            record_type: "traffic",
+            range_start: range.start,
+            range_end: range.end,
+            bucket: Some(sample.bucket),
+            interval_seconds: Some(sample.interval_seconds),
+            interface: "",
+            app_id: "",
+            app_name: "",
+            source: "physical",
+            upload: sample.upload,
+            download: sample.download,
+            direct_upload: 0,
+            direct_download: 0,
+            clash_upload: 0,
+            clash_download: 0,
+            enhanced_upload: 0,
+            enhanced_download: 0,
+            connections: 0,
+            first_seen: None,
+            last_seen: None,
+            identity_ids: String::new(),
+            executable_paths: String::new(),
+        })?;
+    }
+    for interface in interfaces {
+        writer.serialize(CsvExportRow {
+            record_type: "interface_summary",
+            range_start: range.start,
+            range_end: range.end,
+            bucket: None,
+            interval_seconds: None,
+            interface: &interface.interface,
+            app_id: "",
+            app_name: "",
+            source: "physical",
+            upload: interface.upload,
+            download: interface.download,
+            direct_upload: 0,
+            direct_download: 0,
+            clash_upload: 0,
+            clash_download: 0,
+            enhanced_upload: 0,
+            enhanced_download: 0,
+            connections: 0,
+            first_seen: None,
+            last_seen: None,
+            identity_ids: String::new(),
+            executable_paths: String::new(),
+        })?;
+    }
+    for app in apps {
+        writer.serialize(CsvExportRow {
+            record_type: "application",
+            range_start: range.start,
+            range_end: range.end,
+            bucket: None,
+            interval_seconds: None,
+            interface: "",
+            app_id: &app.app.id,
+            app_name: &app.app.name,
+            source: "identified",
+            upload: app.upload(),
+            download: app.download(),
+            direct_upload: app.direct_upload,
+            direct_download: app.direct_download,
+            clash_upload: app.clash_upload,
+            clash_download: app.clash_download,
+            enhanced_upload: app.enhanced_upload,
+            enhanced_download: app.enhanced_download,
+            connections: app.connections,
+            first_seen: Some(app.first_seen),
+            last_seen: Some(app.last_seen),
+            identity_ids: serde_json::to_string(&app.identity_ids)?,
+            executable_paths: serde_json::to_string(&app.executable_paths)?,
+        })?;
+    }
+    writer.flush()?;
+    Ok(())
+}
+
+fn write_atomic_new(path: &Path, write: impl FnOnce(&mut File) -> Result<()>) -> Result<()> {
+    if path.try_exists()? {
+        bail!("输出文件已存在，不会覆盖：{}", path.display());
+    }
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    if !parent.is_dir() {
+        bail!("输出目录不存在：{}", parent.display());
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .context("输出文件名无效")?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temporary = parent.join(format!(
+        ".{file_name}.flowwatch-{}-{nonce}.tmp",
+        std::process::id()
+    ));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&temporary)
+        .with_context(|| format!("无法创建临时导出文件 {}", temporary.display()))?;
+    if let Err(error) = write(&mut file).and_then(|_| file.sync_all().map_err(Into::into)) {
+        drop(file);
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    drop(file);
+    if let Err(error) = fs::hard_link(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        if path.exists() {
+            bail!("输出文件已存在，不会覆盖：{}", path.display());
+        }
+        return Err(error).with_context(|| format!("无法写入导出文件 {}", path.display()));
+    }
+    fs::remove_file(&temporary)?;
+    Ok(())
 }
 
 fn alerts(paths: &AppPaths, command: AlertsCommand) -> Result<()> {
@@ -2715,6 +3028,75 @@ mod tests {
         assert!(validate_display_name(" ").is_err());
         assert!(validate_display_name("bad\nname").is_err());
         assert!(validate_display_name(&"名".repeat(81)).is_err());
+    }
+
+    #[test]
+    fn csv_export_escapes_application_fields() {
+        let range = Period {
+            start: 100,
+            end: 200,
+            label: "测试".into(),
+            exact: true,
+        };
+        let app = AppUsage {
+            app: AppIdentity {
+                id: "bundle:example".into(),
+                name: "应用,\"A\"\n第二行".into(),
+                executable_path: "/Applications/Example, App".into(),
+            },
+            direct_upload: 10,
+            direct_download: 20,
+            connections: 1,
+            first_seen: 110,
+            last_seen: 190,
+            identity_ids: vec!["bundle:example".into()],
+            executable_paths: vec!["/Applications/Example, App".into()],
+            ..AppUsage::default()
+        };
+        let mut output = Vec::new();
+        write_export_csv(&mut output, &range, &[], &[], &[app]).unwrap();
+        let mut reader = csv::Reader::from_reader(output.as_slice());
+        let headers = reader.headers().unwrap().clone();
+        let name_index = headers
+            .iter()
+            .position(|value| value == "app_name")
+            .unwrap();
+        let paths_index = headers
+            .iter()
+            .position(|value| value == "executable_paths")
+            .unwrap();
+        let row = reader.records().next().unwrap().unwrap();
+        assert_eq!(&row[name_index], "应用,\"A\"\n第二行");
+        assert_eq!(&row[paths_index], "[\"/Applications/Example, App\"]");
+    }
+
+    #[test]
+    fn atomic_export_refuses_to_overwrite_an_existing_file() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "flowwatch-export-test-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let output = root.join("traffic.csv");
+        write_atomic_new(&output, |file| {
+            file.write_all(b"first")?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            write_atomic_new(&output, |file| {
+                file.write_all(b"second")?;
+                Ok(())
+            })
+            .is_err()
+        );
+        assert_eq!(fs::read(&output).unwrap(), b"first");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

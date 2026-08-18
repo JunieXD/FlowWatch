@@ -45,6 +45,24 @@ pub struct AppName {
     pub updated_at: i64,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PruneSummary {
+    pub before: i64,
+    pub app_rows: u64,
+    pub interface_rows: u64,
+    pub proxy_rows: u64,
+    pub alert_events: u64,
+}
+
+impl PruneSummary {
+    pub fn total_rows(&self) -> u64 {
+        self.app_rows
+            .saturating_add(self.interface_rows)
+            .saturating_add(self.proxy_rows)
+            .saturating_add(self.alert_events)
+    }
+}
+
 impl AppUsage {
     pub fn upload(&self) -> u64 {
         self.direct_upload
@@ -1168,6 +1186,98 @@ impl Database {
         Ok(())
     }
 
+    pub fn traffic_bounds(&self) -> Result<Option<(i64, i64)>> {
+        self.connection
+            .query_row(
+                "SELECT MIN(bucket), MAX(bucket) FROM (
+                    SELECT bucket FROM app_usage_1m
+                    UNION ALL SELECT bucket FROM app_usage_5m
+                    UNION ALL SELECT bucket FROM app_usage_daily
+                    UNION ALL SELECT bucket FROM interface_minute
+                    UNION ALL SELECT bucket FROM interface_daily
+                    UNION ALL SELECT bucket FROM proxy_minute
+                    UNION ALL SELECT bucket FROM proxy_daily
+                 )",
+                [],
+                |row| {
+                    let oldest: Option<i64> = row.get(0)?;
+                    let newest: Option<i64> = row.get(1)?;
+                    Ok(oldest.zip(newest))
+                },
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn traffic_row_counts(&self) -> Result<BTreeMap<String, u64>> {
+        let mut counts = BTreeMap::new();
+        for table in [
+            "app_usage_1m",
+            "app_usage_5m",
+            "app_usage_daily",
+            "interface_minute",
+            "interface_daily",
+            "proxy_minute",
+            "proxy_daily",
+        ] {
+            let count =
+                self.connection
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                        row.get::<_, i64>(0)
+                    })?;
+            counts.insert(table.to_string(), db_u64(count));
+        }
+        Ok(counts)
+    }
+
+    pub fn prune_before(&mut self, before: i64) -> Result<PruneSummary> {
+        let integrity = self.integrity_check()?;
+        if integrity != "ok" {
+            anyhow::bail!("数据库完整性检查返回异常结果：{integrity}");
+        }
+        let transaction = self.connection.transaction()?;
+        let deleted = |tables: &[&str]| -> Result<u64> {
+            let mut total = 0u64;
+            for table in tables {
+                total = total.saturating_add(
+                    transaction
+                        .execute(&format!("DELETE FROM {table} WHERE bucket < ?1"), [before])?
+                        as u64,
+                );
+            }
+            Ok(total)
+        };
+        let app_rows = deleted(&["app_usage_1m", "app_usage_5m", "app_usage_daily"])?;
+        let interface_rows = deleted(&["interface_minute", "interface_daily"])?;
+        let proxy_rows = deleted(&["proxy_minute", "proxy_daily"])?;
+        let alert_events = transaction
+            .execute("DELETE FROM alert_events WHERE period_start < ?1", [before])?
+            as u64;
+        transaction.commit()?;
+        Ok(PruneSummary {
+            before,
+            app_rows,
+            interface_rows,
+            proxy_rows,
+            alert_events,
+        })
+    }
+
+    pub fn compact(&mut self) -> Result<(u64, u64)> {
+        let integrity = self.integrity_check()?;
+        if integrity != "ok" {
+            anyhow::bail!("数据库完整性检查返回异常结果：{integrity}");
+        }
+        let before = self.size_bytes();
+        self.connection.execute_batch(
+            "PRAGMA wal_checkpoint(TRUNCATE);
+             VACUUM;
+             PRAGMA optimize;
+             PRAGMA wal_checkpoint(TRUNCATE);",
+        )?;
+        self.restrict_files()?;
+        Ok((before, self.size_bytes()))
+    }
+
     pub fn integrity_check(&self) -> Result<String> {
         Ok(self
             .connection
@@ -2000,6 +2110,62 @@ mod tests {
         assert!(database.alert_rules().unwrap().is_empty());
         assert!(!database.alert_event_exists(id, 100, 80).unwrap());
         assert!(!database.remove_alert_rule(id).unwrap());
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn prune_uses_an_exact_boundary_and_compact_preserves_integrity() {
+        let (root, mut database) = temporary_database();
+        let boundary = five_minute_bucket(Local::now().timestamp());
+        let old = boundary.saturating_sub(300);
+        let app = AppIdentity::process("Example", "/tmp/Example");
+        let mut batch = FlushBatch::default();
+        for bucket in [old, boundary] {
+            batch.apps.insert(
+                (bucket, app.clone(), UsageSource::Direct),
+                UsageDelta {
+                    upload: 10,
+                    download: 20,
+                    connections: 1,
+                    first_seen: bucket,
+                    last_seen: bucket,
+                },
+            );
+            batch.interfaces.insert(
+                (bucket, "en0".into()),
+                ByteDelta {
+                    upload: 30,
+                    download: 40,
+                },
+            );
+            let mut proxy = CoreDelta::default();
+            proxy.add(5, 6, 3, 4);
+            batch.proxy_totals.insert(bucket, proxy);
+        }
+        database.flush(&batch).unwrap();
+        let rule = database.add_alert_rule("daily", &[], "", 100, old).unwrap();
+        database.record_alert_event(rule, old, 80, old).unwrap();
+        database
+            .record_alert_event(rule, boundary, 80, boundary)
+            .unwrap();
+
+        let summary = database.prune_before(boundary).unwrap();
+        assert_eq!(summary.app_rows, 1);
+        assert_eq!(summary.interface_rows, 1);
+        assert_eq!(summary.proxy_rows, 1);
+        assert_eq!(summary.alert_events, 1);
+        assert_eq!(summary.total_rows(), 4);
+        let counts = database.traffic_row_counts().unwrap();
+        assert_eq!(counts["app_usage_5m"], 1);
+        assert_eq!(counts["interface_minute"], 1);
+        assert_eq!(counts["proxy_minute"], 1);
+        assert!(database.alert_event_exists(rule, boundary, 80).unwrap());
+        assert!(!database.alert_event_exists(rule, old, 80).unwrap());
+
+        let (before, after) = database.compact().unwrap();
+        assert!(after <= before);
+        assert_eq!(database.integrity_check().unwrap(), "ok");
         drop(database);
         std::fs::remove_dir_all(root).unwrap();
     }

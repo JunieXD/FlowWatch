@@ -259,6 +259,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "csv",
  "directories",
  "flowwatch-clash",
  "flowwatch-core",

@@ -17,6 +17,7 @@ publish.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true
+csv.workspace = true
 directories.workspace = true
 flowwatch-clash.workspace = true
 flowwatch-core.workspace = true
