@@ -1,8 +1,8 @@
 use crate::chart as terminal_chart;
 use crate::clash_config::read_clash_config;
 use crate::cli::{
-    AppGranularity, ChartArgs, Cli, Command as CliCommand, ConfigCommand, InstallArgs, QueryArgs,
-    SortBy, TimeRangeArgs,
+    AppGranularity, ChartArgs, Cli, Command as CliCommand, ConfigCommand, ExplainArgs, InstallArgs,
+    QueryArgs, SortBy, TimeRangeArgs,
 };
 use crate::collector::{Collector, RuntimeSettings, acquire_lock};
 use crate::paths::{AGENT_LABEL, AppPaths};
@@ -35,6 +35,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         CliCommand::Collect(args) => collect(&paths, args.run_seconds),
         CliCommand::Status => status(&paths),
         CliCommand::Chart(args) => chart(&paths, args),
+        CliCommand::Explain(args) => explain(&paths, args),
         CliCommand::Apps(args) => apps(&paths, args),
         CliCommand::Interfaces(args) => interfaces(&paths, args),
         CliCommand::Spikes(args) => spikes(&paths, args),
@@ -128,6 +129,189 @@ fn collect(paths: &AppPaths, run_seconds: u64) -> Result<()> {
     signal_hook::flag::register(SIGINT, Arc::clone(&stop))?;
     signal_hook::flag::register(SIGTERM, Arc::clone(&stop))?;
     Collector::new(database, settings)?.run(run_seconds, stop)
+}
+
+fn explain(paths: &AppPaths, args: ExplainArgs) -> Result<()> {
+    let database = Database::open(&paths.database)?;
+    let meta = database.meta()?;
+    let (range, selected_from_range) = explain_range(&database, &meta, &args)?;
+    let physical = sum_interfaces(&database.query_interfaces(range.start, range.end)?);
+    if physical.0 == 0 && physical.1 == 0 {
+        println!("流量分析（{}）", range.label);
+        println!("该时段没有网卡流量记录。");
+        println!("可运行 flowwatch chart --period 24h 查看哪些时间有数据。");
+        return Ok(());
+    }
+
+    let attribution_start = attribution_window_start(&meta, range.start);
+    let app_rows = if attribution_start < range.end {
+        database.query_apps(attribution_start, range.end)?
+    } else {
+        Vec::new()
+    };
+    let mut app_rows = Database::group_apps_for_display(app_rows);
+    let summary = AppCoverageSummary::new(&app_rows, physical);
+    sort_apps(&mut app_rows, SortBy::Total);
+    app_rows.truncate(args.limit);
+
+    let duration = range.end.saturating_sub(range.start);
+    let previous = sum_interfaces(
+        &database.query_interfaces(range.start.saturating_sub(duration), range.start)?,
+    );
+    let next =
+        sum_interfaces(&database.query_interfaces(range.end, range.end.saturating_add(duration))?);
+    let comparison = WindowComparison::new(physical, previous, next);
+
+    if args.json {
+        let output = ExplainOutput {
+            range: RangeOutput::from(&range),
+            selected_from_range,
+            summary,
+            comparison,
+            apps: app_rows.iter().map(AppOutput::from).collect(),
+        };
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
+    println!("流量分析（{}）", range.label);
+    if selected_from_range {
+        println!(
+            "所选范围内的最高流量时段从 {} 开始。",
+            format_timestamp(range.start)
+        );
+    }
+    println!(
+        "时段：{} 至 {}",
+        format_timestamp(range.start),
+        format_timestamp(range.end)
+    );
+    print_app_coverage(&summary);
+    println!();
+    println!("相邻时段比较");
+    println!(
+        "  前一时段：{}",
+        comparison_label(comparison.previous_percent)
+    );
+    println!("  后一时段：{}", comparison_label(comparison.next_percent));
+    println!();
+    println!("主要应用");
+    if app_rows.is_empty() {
+        println!("  该时段没有找到对应应用的记录。");
+    } else {
+        println!(
+            "{} {} {} {}  应用",
+            table_left("序号", 4),
+            table_right("上传", 11),
+            table_right("下载", 11),
+            table_right("合计", 11),
+        );
+        for (index, row) in app_rows.iter().enumerate() {
+            let upload = human_bytes(row.upload());
+            let download = human_bytes(row.download());
+            let total = human_bytes(row.upload().saturating_add(row.download()));
+            println!(
+                "{} {} {} {}  {} [{}]",
+                table_left(&(index + 1).to_string(), 4),
+                table_right(&upload, 11),
+                table_right(&download, 11),
+                table_right(&total, 11),
+                display_app_name(&row.app.name),
+                sources(row),
+            );
+        }
+    }
+    println!();
+    println!("继续查看：");
+    println!(
+        "  flowwatch chart --from \"{}\" --to \"{}\"",
+        format_timestamp(range.start),
+        format_timestamp(range.end),
+    );
+    println!(
+        "  flowwatch apps --from \"{}\" --to \"{}\"",
+        format_timestamp(range.start),
+        format_timestamp(range.end),
+    );
+    Ok(())
+}
+
+fn explain_range(
+    database: &Database,
+    meta: &std::collections::BTreeMap<String, String>,
+    args: &ExplainArgs,
+) -> Result<(Period, bool)> {
+    if let Some(raw) = &args.at {
+        let timestamp = parse_query_timestamp(raw)?;
+        let bucket_seconds = gap_bucket_seconds(database, meta, timestamp)?;
+        let start = timestamp - timestamp.rem_euclid(bucket_seconds);
+        return Ok((
+            Period {
+                start,
+                end: start.saturating_add(bucket_seconds),
+                label: format!(
+                    "{} 起的{}",
+                    format_timestamp(start),
+                    bucket_label(bucket_seconds)
+                ),
+                exact: false,
+            },
+            false,
+        ));
+    }
+
+    validate_time_range(&args.range)?;
+    let requested = parse_time_range(&args.range)?;
+    if let Some(peak) = database
+        .query_spikes(requested.start, requested.end)?
+        .into_iter()
+        .max_by_key(|row| row.upload.saturating_add(row.download))
+    {
+        let bucket_seconds = gap_bucket_seconds(database, meta, peak.bucket)?;
+        let start = peak.bucket - peak.bucket.rem_euclid(bucket_seconds);
+        return Ok((
+            Period {
+                start,
+                end: start.saturating_add(bucket_seconds),
+                label: requested.label,
+                exact: false,
+            },
+            true,
+        ));
+    }
+
+    let peak = database
+        .query_traffic_samples(requested.start, requested.end)?
+        .into_iter()
+        .max_by(|left, right| {
+            let left_rate = left.upload.saturating_add(left.download) as u128
+                * right.interval_seconds.max(1) as u128;
+            let right_rate = right.upload.saturating_add(right.download) as u128
+                * left.interval_seconds.max(1) as u128;
+            left_rate.cmp(&right_rate)
+        });
+    match peak {
+        Some(peak) => Ok((
+            Period {
+                start: peak.bucket,
+                end: peak.bucket.saturating_add(peak.interval_seconds),
+                label: requested.label,
+                exact: false,
+            },
+            true,
+        )),
+        None => Ok((requested, true)),
+    }
+}
+
+fn bucket_label(seconds: i64) -> String {
+    if seconds == 60 {
+        "1 分钟".to_string()
+    } else if seconds % 86_400 == 0 {
+        format!("{} 天", seconds / 86_400)
+    } else {
+        format!("{} 分钟", seconds / 60)
+    }
 }
 
 fn status(paths: &AppPaths) -> Result<()> {
@@ -490,6 +674,12 @@ fn spikes(paths: &AppPaths, args: QueryArgs) -> Result<()> {
     }
     if rows.is_empty() {
         println!("所选时间内没有分钟记录；分钟明细只保留有限天数。");
+    } else if let Some(first) = rows.first() {
+        println!();
+        println!(
+            "进一步分析第一条记录：flowwatch explain --at \"{}\"",
+            format_timestamp(first.bucket)
+        );
     }
     Ok(())
 }
@@ -877,6 +1067,43 @@ fn configure(paths: &AppPaths, command: ConfigCommand) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[derive(Serialize)]
+struct ExplainOutput<'a> {
+    range: RangeOutput<'a>,
+    selected_from_range: bool,
+    summary: AppCoverageSummary,
+    comparison: WindowComparison,
+    apps: Vec<AppOutput<'a>>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+struct WindowComparison {
+    previous_percent: Option<f64>,
+    next_percent: Option<f64>,
+}
+
+impl WindowComparison {
+    fn new(current: (u64, u64), previous: (u64, u64), next: (u64, u64)) -> Self {
+        let current = current.0.saturating_add(current.1);
+        Self {
+            previous_percent: relative_change(current, previous.0.saturating_add(previous.1)),
+            next_percent: relative_change(current, next.0.saturating_add(next.1)),
+        }
+    }
+}
+
+fn relative_change(current: u64, comparison: u64) -> Option<f64> {
+    (comparison > 0).then_some((current as f64 - comparison as f64) * 100.0 / comparison as f64)
+}
+
+fn comparison_label(change: Option<f64>) -> String {
+    match change {
+        Some(change) if change >= 0.0 => format!("当前时段高 {change:.1}%"),
+        Some(change) => format!("当前时段低 {:.1}%", change.abs()),
+        None => "没有可比较的流量记录".to_string(),
+    }
 }
 
 #[derive(Serialize)]
@@ -1756,6 +1983,15 @@ mod tests {
         assert_eq!(summary.coverage_percent, None);
         assert_eq!(summary.unidentified_total, 0);
         assert!(!summary.overcount);
+    }
+
+    #[test]
+    fn window_comparison_handles_increases_decreases_and_missing_data() {
+        let comparison = WindowComparison::new((150, 50), (50, 50), (300, 100));
+        assert_eq!(comparison.previous_percent, Some(100.0));
+        assert_eq!(comparison.next_percent, Some(-50.0));
+        assert_eq!(relative_change(100, 0), None);
+        assert_eq!(comparison_label(Some(-25.0)), "当前时段低 25.0%");
     }
 
     #[test]

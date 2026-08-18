@@ -41,6 +41,7 @@ flowwatch apps --period 今天
 flowwatch apps --date 2026-08-18
 flowwatch apps --period 24h --sort download --limit 50
 flowwatch apps --from "2026-08-18 09:00" --to "2026-08-18 18:00"
+flowwatch explain --at "2026-08-18 18:37"
 flowwatch gaps --period 24h --limit 20
 ```
 
@@ -106,6 +107,7 @@ Clash 并非必需。不开系统代理、不使用 Clash 时，标准模式仍�
 | --- | --- |
 | `flowwatch status` | 查看采集服务、实际总量、已识别应用和 Clash 状态。 |
 | `flowwatch chart` | 在终端绘制上传、下载和合计流量趋势图。 |
+| `flowwatch explain` | 分析指定或最高流量时段的主要应用和未识别流量。 |
 | `flowwatch apps` | 按上传、下载或总量查看应用排行。 |
 | `flowwatch interfaces` | 查看各物理网卡的实际流量。 |
 | `flowwatch spikes` | 查看流量最高的分钟。 |

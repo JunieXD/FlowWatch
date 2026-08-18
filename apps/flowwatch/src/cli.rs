@@ -58,6 +58,19 @@ const CHART_AFTER_HELP: &str = "\
 时间范围：
   --date 用于查看某个自然日；--from 和 --to 用于任意起止时间。
   --period、--date 和 --from/--to 三种写法不能同时使用。";
+const EXPLAIN_AFTER_HELP: &str = "\
+说明：
+  使用 --at 可直接分析某一分钟；程序会自动采用当时的应用明细精度。
+  使用时间范围时，会先找到范围内流量最高的时段，再分析主要应用和未识别流量。
+
+示例：
+  flowwatch explain --at \"2026-08-18 18:37\"
+  flowwatch explain --period 24h
+  flowwatch explain --date 2026-08-18
+  flowwatch explain --from \"2026-08-18 18:30\" --to \"2026-08-18 18:45\"
+
+时间范围：
+  --at、--period、--date 和 --from/--to 四种写法不能同时使用。";
 const APPS_AFTER_HELP: &str = "\
 示例：
   flowwatch apps
@@ -416,6 +429,28 @@ mod tests {
         let message = localized_error_message(&error);
         assert!(message.contains("图表宽度必须在 50 到 240 之间"));
     }
+
+    #[test]
+    fn explain_accepts_a_timestamp_or_a_range_but_not_both() {
+        assert!(Cli::try_parse_from(["flowwatch", "explain", "--at", "2026-08-18 18:37"]).is_ok());
+        assert!(
+            Cli::try_parse_from([
+                "flowwatch",
+                "explain",
+                "--at",
+                "2026-08-18 18:37",
+                "--period",
+                "24h",
+            ])
+            .is_err()
+        );
+        let error = localized_command()
+            .try_get_matches_from(["flowwatch", "help", "explain"])
+            .unwrap_err();
+        let help = error.to_string();
+        assert!(help.contains("flowwatch explain --at \"2026-08-18 18:37\""));
+        assert!(help.contains("主要应用和未识别流量"));
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -429,6 +464,9 @@ pub enum Command {
     /// 在终端中绘制上传、下载和合计流量趋势图。
     #[command(after_help = CHART_AFTER_HELP)]
     Chart(ChartArgs),
+    /// 分析流量最高或指定的时段，找出主要应用和未识别流量。
+    #[command(after_help = EXPLAIN_AFTER_HELP)]
+    Explain(ExplainArgs),
     /// 按上传、下载或总量查看应用排行。
     #[command(after_help = APPS_AFTER_HELP)]
     Apps(QueryArgs),
@@ -528,6 +566,36 @@ pub struct QueryArgs {
         value_name = "条数",
         default_value_t = 20,
         hide_default_value = true,
+        help_heading = "选项"
+    )]
+    pub limit: usize,
+
+    /// 输出 JSON，字段名保持英文。
+    #[arg(long, help_heading = "选项")]
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ExplainArgs {
+    #[command(flatten)]
+    pub range: TimeRangeArgs,
+
+    /// 分析包含该时间点的应用明细时段；支持本地时间、Unix 时间戳和 RFC 3339。
+    #[arg(
+        long,
+        value_name = "时间",
+        conflicts_with_all = ["period", "date", "from", "to"],
+        help_heading = "选项"
+    )]
+    pub at: Option<String>,
+
+    /// 最多显示多少个主要应用；默认 5 个。
+    #[arg(
+        long,
+        value_name = "数量",
+        default_value_t = 5,
+        hide_default_value = true,
+        value_parser = parse_explain_limit,
         help_heading = "选项"
     )]
     pub limit: usize,
@@ -640,6 +708,10 @@ fn parse_chart_height(raw: &str) -> Result<usize, String> {
 
 fn parse_chart_width(raw: &str) -> Result<usize, String> {
     parse_bounded_usize(raw, 50, 240, "图表宽度")
+}
+
+fn parse_explain_limit(raw: &str) -> Result<usize, String> {
+    parse_bounded_usize(raw, 1, 50, "应用数量")
 }
 
 fn parse_bounded_usize(
