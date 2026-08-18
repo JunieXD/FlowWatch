@@ -1,6 +1,6 @@
 # 发布流程
 
-FlowWatch 通过 GitHub Actions 根据版本标签构建发布包。流程会发布 Apple Silicon 与 Intel 两种归档文件，以及 `SHA256SUMS` 校验文件。`0.1.x` 是未签名的 CLI 和当前用户 LaunchAgent，因此不需要 Apple Developer 证书。
+FlowWatch 通过 GitHub Actions 根据版本标签构建发布包。流程会发布 Apple Silicon 与 Intel 两种归档文件，以及 `SHA256SUMS` 校验文件。当前发行物是未签名的 CLI 和当前用户 LaunchAgent，因此不需要 Apple Developer 证书。
 
 ## 发布准备
 
@@ -14,8 +14,9 @@ cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo test --locked --workspace
 cargo build --locked --release --workspace
-scripts/check-release.sh v0.1.4 target/release/flowwatch
+scripts/check-release.sh v0.2.0 target/release/flowwatch
 scripts/test-installer.sh
+scripts/test-homebrew-formula.sh
 ```
 
 5. 提交发布准备工作，并等待 `main` 上的持续检查通过。
@@ -25,8 +26,8 @@ scripts/test-installer.sh
 创建与 Cargo 版本完全一致的带说明标签并推送：
 
 ```sh
-git tag -a v0.1.4 -m "FlowWatch v0.1.4"
-git push origin v0.1.4
+git tag -a v0.2.0 -m "FlowWatch v0.2.0"
+git push origin v0.2.0
 ```
 
 发布工作流随后会：
