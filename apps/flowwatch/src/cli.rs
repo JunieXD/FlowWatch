@@ -96,6 +96,15 @@ const REPORT_AFTER_HELP: &str = "\
   flowwatch report --date 2026-08-18
   flowwatch report --period 7d --compare
   flowwatch report --period 24h --json";
+const INVESTIGATE_AFTER_HELP: &str = "\
+调查模式会临时使用每秒采样和每分钟应用明细，到期后自动恢复原设置。
+
+示例：
+  flowwatch investigate start --duration 30m
+  flowwatch investigate status
+  flowwatch investigate stop
+
+时长可使用 5m、30m、1h、6h 或 24h，范围为 5 分钟到 24 小时。";
 const APPS_AFTER_HELP: &str = "\
 示例：
   flowwatch apps
@@ -506,6 +515,25 @@ mod tests {
             Cli::try_parse_from(["flowwatch", "report", "--period", "24h", "--compare"]).is_ok()
         );
     }
+
+    #[test]
+    fn investigation_duration_is_bounded_and_help_explains_auto_restore() {
+        assert_eq!(parse_investigation_duration("5m").unwrap(), 300);
+        assert_eq!(parse_investigation_duration("24h").unwrap(), 86_400);
+        assert!(parse_investigation_duration("4m").is_err());
+        assert!(parse_investigation_duration("25h").is_err());
+        assert!(parse_investigation_duration("300").is_err());
+        assert!(
+            Cli::try_parse_from(["flowwatch", "investigate", "start", "--duration", "30m",])
+                .is_ok()
+        );
+        let error = localized_command()
+            .try_get_matches_from(["flowwatch", "help", "investigate"])
+            .unwrap_err();
+        let help = error.to_string();
+        assert!(help.contains("到期后自动恢复原设置"));
+        assert!(help.contains("flowwatch investigate stop"));
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -525,6 +553,9 @@ pub enum Command {
     /// 生成包含总量、主要应用、高峰和数据说明的流量报告。
     #[command(after_help = REPORT_AFTER_HELP)]
     Report(ReportArgs),
+    /// 临时提高采样精度，并在到期后自动恢复。
+    #[command(after_help = INVESTIGATE_AFTER_HELP)]
+    Investigate(InvestigateArgs),
     /// 按上传、下载或总量查看应用排行。
     #[command(after_help = APPS_AFTER_HELP)]
     Apps(AppsArgs),
@@ -715,6 +746,33 @@ pub struct ReportArgs {
     pub json: bool,
 }
 
+#[derive(Debug, Args)]
+pub struct InvestigateArgs {
+    #[command(subcommand)]
+    pub command: InvestigateCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum InvestigateCommand {
+    /// 启动有明确结束时间的高精度调查。
+    Start {
+        /// 调查持续时间，例如 30m、1h 或 6h。
+        #[arg(
+            long,
+            value_name = "时长",
+            default_value = "30m",
+            hide_default_value = true,
+            value_parser = parse_investigation_duration,
+            help_heading = "选项"
+        )]
+        duration: u64,
+    },
+    /// 查看调查模式是否运行以及剩余时间。
+    Status,
+    /// 提前停止调查并恢复原设置。
+    Stop,
+}
+
 #[derive(Debug, Clone, Args)]
 pub struct ChartArgs {
     #[command(flatten)]
@@ -826,6 +884,27 @@ fn parse_chart_width(raw: &str) -> Result<usize, String> {
 
 fn parse_explain_limit(raw: &str) -> Result<usize, String> {
     parse_bounded_usize(raw, 1, 50, "应用数量")
+}
+
+fn parse_investigation_duration(raw: &str) -> Result<u64, String> {
+    let value = raw.trim().to_lowercase();
+    let (number, multiplier) = if let Some(number) = value.strip_suffix('m') {
+        (number, 60u64)
+    } else if let Some(number) = value.strip_suffix('h') {
+        (number, 3_600u64)
+    } else {
+        return Err("调查时长必须使用 m（分钟）或 h（小时），例如 30m 或 2h".to_string());
+    };
+    let number = number
+        .parse::<u64>()
+        .map_err(|_| "调查时长必须是整数，例如 30m 或 2h".to_string())?;
+    let seconds = number
+        .checked_mul(multiplier)
+        .ok_or_else(|| "调查时长过大".to_string())?;
+    if !(300..=86_400).contains(&seconds) {
+        return Err("调查时长必须在 5 分钟到 24 小时之间".to_string());
+    }
+    Ok(seconds)
 }
 
 fn parse_bounded_usize(

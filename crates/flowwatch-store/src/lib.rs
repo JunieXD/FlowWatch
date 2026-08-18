@@ -267,6 +267,12 @@ impl Database {
             .optional()?)
     }
 
+    pub fn delete_setting(&mut self, key: &str) -> Result<()> {
+        self.connection
+            .execute("DELETE FROM settings WHERE key=?1", [key])?;
+        Ok(())
+    }
+
     pub fn set_clash_config(&mut self, config: &ClashConfig) -> Result<()> {
         self.set_setting("clash_config", &serde_json::to_string(config)?)
     }

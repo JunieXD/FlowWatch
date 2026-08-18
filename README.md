@@ -69,6 +69,16 @@ flowwatch report --date 2026-08-18
 
 报告包含实际总量、应用识别完整度、主要应用、实际流量最高时段、未找到应用最多的时段和数据质量说明。`--compare` 会与紧邻的上一段等长时间比较；`--json` 可输出相同内容的结构化结果。
 
+问题正在发生时，可以临时提高采样精度：
+
+```sh
+flowwatch investigate start --duration 30m
+flowwatch investigate status
+flowwatch investigate stop
+```
+
+调查模式使用每秒采样和每分钟应用明细，允许时长为 5 分钟到 24 小时。原设置不会被覆盖；到期、手动停止、程序重启或 Mac 重启后都会恢复。高频采样会临时增加 CPU 使用，只应在排查问题时开启。
+
 ### 查看流量趋势
 
 ```sh
@@ -129,6 +139,7 @@ Clash 并非必需。不开系统代理、不使用 Clash 时，标准模式仍�
 | `flowwatch chart` | 在终端绘制上传、下载和合计流量趋势图。 |
 | `flowwatch explain` | 分析指定或最高流量时段的主要应用和未识别流量。 |
 | `flowwatch report` | 一次生成总量、主要应用、高峰和数据说明。 |
+| `flowwatch investigate` | 临时提高采样精度，并按时自动恢复。 |
 | `flowwatch apps` | 按上传、下载或总量查看应用排行。 |
 | `flowwatch app` | 查看单个应用的流量、身份、路径和最高时段。 |
 | `flowwatch interfaces` | 查看各物理网卡的实际流量。 |

@@ -2,7 +2,7 @@ use crate::chart as terminal_chart;
 use crate::clash_config::read_clash_config;
 use crate::cli::{
     AppArgs, AppGranularity, AppsArgs, ChartArgs, Cli, Command as CliCommand, ConfigCommand,
-    ExplainArgs, InstallArgs, QueryArgs, ReportArgs, SortBy, TimeRangeArgs,
+    ExplainArgs, InstallArgs, InvestigateCommand, QueryArgs, ReportArgs, SortBy, TimeRangeArgs,
 };
 use crate::collector::{Collector, RuntimeSettings, acquire_lock};
 use crate::paths::{AGENT_LABEL, AppPaths};
@@ -38,6 +38,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         CliCommand::Chart(args) => chart(&paths, args),
         CliCommand::Explain(args) => explain(&paths, args),
         CliCommand::Report(args) => report(&paths, args),
+        CliCommand::Investigate(args) => investigate(&paths, args.command),
         CliCommand::Apps(args) => apps(&paths, args),
         CliCommand::App(args) => app(&paths, args),
         CliCommand::Interfaces(args) => interfaces(&paths, args),
@@ -168,7 +169,8 @@ fn chart(paths: &AppPaths, args: ChartArgs) -> Result<()> {
 
 fn collect(paths: &AppPaths, run_seconds: u64) -> Result<()> {
     let _lock = acquire_lock(&paths.lock_file)?;
-    let database = Database::open(&paths.database)?;
+    let mut database = Database::open(&paths.database)?;
+    crate::investigation::clear_if_expired(&mut database, Local::now().timestamp())?;
     let settings = RuntimeSettings::load(&database)?;
     let stop = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(SIGINT, Arc::clone(&stop))?;
@@ -577,6 +579,7 @@ fn status(paths: &AppPaths) -> Result<()> {
     let database = Database::open(&paths.database)?;
     let meta = database.meta()?;
     let now = Local::now().timestamp();
+    let investigation = crate::investigation::load(&database)?.filter(|state| state.active_at(now));
     let start = day_bucket(now);
     let attribution_start = attribution_window_start(&meta, start);
     let apps = database.query_apps(attribution_start, now + 1)?;
@@ -648,8 +651,19 @@ fn status(paths: &AppPaths) -> Result<()> {
     }
     println!(
         "  应用明细：{}",
-        app_granularity_label(app_bucket_seconds(&database)?)
+        if investigation.is_some() {
+            "每分钟（调查模式）"
+        } else {
+            app_granularity_label(app_bucket_seconds(&database)?)
+        }
     );
+    if let Some(state) = &investigation {
+        println!(
+            "  调查模式：运行中，{}后自动恢复（结束于 {}）",
+            human_duration(state.remaining_seconds(now)),
+            format_timestamp(state.ends_at),
+        );
+    }
     println!();
     println!("今天");
     println!(
@@ -765,6 +779,94 @@ fn status(paths: &AppPaths) -> Result<()> {
     if !running {
         println!();
         println!("下一步：运行 flowwatch doctor 查看原因，或运行 flowwatch install 启动服务。");
+    }
+    Ok(())
+}
+
+fn investigate(paths: &AppPaths, command: InvestigateCommand) -> Result<()> {
+    let mut database = Database::open(&paths.database)?;
+    let now = Local::now().timestamp();
+    let expired = crate::investigation::clear_if_expired(&mut database, now)?;
+    let manages_launch_agent = paths.uses_default_database && launch_agent_loaded();
+    if expired && manages_launch_agent {
+        restart_launch_agent()?;
+    }
+
+    match command {
+        InvestigateCommand::Start { duration } => {
+            let poll_seconds = database
+                .setting("poll_seconds")?
+                .as_deref()
+                .unwrap_or("3")
+                .parse::<u64>()
+                .context("已保存的采样间隔无效")?;
+            let granularity = database
+                .setting("app_granularity")?
+                .unwrap_or_else(|| "5m".to_string());
+            let state = crate::investigation::start(
+                &mut database,
+                now,
+                duration,
+                poll_seconds,
+                &granularity,
+            )?;
+            if manages_launch_agent && let Err(error) = restart_launch_agent() {
+                crate::investigation::stop(&mut database)?;
+                return Err(error).context("无法启动调查模式，已恢复原设置");
+            }
+            println!("调查模式已启动。");
+            println!("  临时采样：每 1 秒");
+            println!("  临时应用明细：每 1 分钟");
+            println!("  自动结束：{}", format_timestamp(state.ends_at));
+            println!(
+                "  原设置：每 {} 秒采样，{}应用明细",
+                state.original_poll_seconds,
+                if state.original_app_granularity == "1m" {
+                    "每分钟"
+                } else {
+                    "每五分钟"
+                }
+            );
+            if paths.uses_default_database && !manages_launch_agent {
+                println!("采集服务当前未运行；请运行 flowwatch install 启动服务。");
+            } else if !paths.uses_default_database {
+                println!(
+                    "这是指定数据库；运行 flowwatch --database \"{}\" collect 后生效。",
+                    paths.database.display()
+                );
+            }
+            println!("可运行 flowwatch investigate status 查看剩余时间。");
+        }
+        InvestigateCommand::Status => match crate::investigation::load(&database)? {
+            Some(state) if state.active_at(now) => {
+                println!("调查模式：运行中");
+                println!("  开始时间：{}", format_timestamp(state.started_at));
+                println!("  结束时间：{}", format_timestamp(state.ends_at));
+                println!(
+                    "  剩余时间：{}",
+                    human_duration(state.remaining_seconds(now))
+                );
+                println!("  当前采样：每 1 秒；应用明细：每 1 分钟");
+            }
+            _ => {
+                println!("调查模式：未运行");
+                println!("启动示例：flowwatch investigate start --duration 30m");
+            }
+        },
+        InvestigateCommand::Stop => {
+            if crate::investigation::stop(&mut database)?.is_some() {
+                if manages_launch_agent {
+                    restart_launch_agent()?;
+                    println!("调查模式已停止，采集服务将使用原设置继续运行。");
+                } else if paths.uses_default_database {
+                    println!("调查模式已停止，原设置已经恢复；采集服务当前未运行。");
+                } else {
+                    println!("调查模式已停止，指定数据库的原设置已经恢复。");
+                }
+            } else {
+                println!("调查模式当前没有运行，无需恢复设置。");
+            }
+        }
     }
     Ok(())
 }
@@ -1309,6 +1411,7 @@ fn install(paths: &AppPaths, args: InstallArgs) -> Result<()> {
             "daily_days",
         )?,
         app_bucket_seconds: app_granularity.bucket_seconds(),
+        investigation_until: None,
     };
     settings.validate()?;
 

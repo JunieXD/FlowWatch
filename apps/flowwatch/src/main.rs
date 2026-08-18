@@ -3,6 +3,7 @@ mod clash_config;
 mod cli;
 mod collector;
 mod commands;
+mod investigation;
 mod paths;
 
 use anyhow::Result;

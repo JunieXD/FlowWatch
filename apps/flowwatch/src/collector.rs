@@ -22,16 +22,29 @@ pub struct RuntimeSettings {
     pub detail_days: i64,
     pub daily_days: i64,
     pub app_bucket_seconds: i64,
+    pub investigation_until: Option<i64>,
 }
 
 impl RuntimeSettings {
     pub fn load(database: &Database) -> Result<Self> {
+        let investigation = crate::investigation::load(database)?
+            .filter(|state| state.active_at(Local::now().timestamp()));
         let settings = Self {
             poll_seconds: parse_setting(database, "poll_seconds", 3u64)?,
             flush_seconds: parse_setting(database, "flush_seconds", 60u64)?,
             detail_days: parse_setting(database, "detail_days", 30i64)?,
             daily_days: parse_setting(database, "daily_days", 365i64)?,
             app_bucket_seconds: parse_app_bucket_seconds(database)?,
+            investigation_until: investigation.as_ref().map(|state| state.ends_at),
+        };
+        let settings = if investigation.is_some() {
+            Self {
+                poll_seconds: 1,
+                app_bucket_seconds: 60,
+                ..settings
+            }
+        } else {
+            settings
         };
         settings.validate()?;
         Ok(settings)
@@ -51,6 +64,14 @@ impl RuntimeSettings {
             bail!("应用明细粒度必须为 1m 或 5m");
         }
         Ok(())
+    }
+
+    fn collector_mode(&self) -> &'static str {
+        if self.investigation_until.is_some() {
+            "investigation"
+        } else {
+            "standard"
+        }
     }
 }
 
@@ -170,6 +191,14 @@ impl Collector {
         while !stop.load(Ordering::Relaxed)
             && (run_seconds == 0 || run_started.elapsed() < Duration::from_secs(run_seconds))
         {
+            if self
+                .settings
+                .investigation_until
+                .is_some_and(|ends_at| Local::now().timestamp() >= ends_at)
+            {
+                crate::investigation::stop(&mut self.database)?;
+                break;
+            }
             let now = self.sample_processes();
             self.sample_interfaces(now);
             self.sample_clash(now);
@@ -321,7 +350,10 @@ impl Collector {
         self.database.set_meta(&BTreeMap::from([
             ("collector_pid".into(), std::process::id().to_string()),
             ("collector_started_at".into(), self.started_at.to_string()),
-            ("collector_mode".into(), "standard".into()),
+            (
+                "collector_mode".into(),
+                self.settings.collector_mode().into(),
+            ),
             ("collector_engine".into(), "nettop_snapshot_v3".into()),
             (
                 "history_started_at".into(),
@@ -346,7 +378,10 @@ impl Collector {
         self.pending.meta = BTreeMap::from([
             ("collector_pid".into(), std::process::id().to_string()),
             ("collector_started_at".into(), self.started_at.to_string()),
-            ("collector_mode".into(), "standard".into()),
+            (
+                "collector_mode".into(),
+                self.settings.collector_mode().into(),
+            ),
             ("collector_engine".into(), "nettop_snapshot_v3".into()),
             (
                 "history_started_at".into(),
@@ -513,4 +548,52 @@ fn merge_pending_app(
 fn truncate_error(error: &impl std::fmt::Display) -> String {
     let value = error.to_string().replace('\n', " ");
     value.chars().take(500).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn investigation_overrides_runtime_settings_without_changing_base_values() {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let sequence = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "flowwatch-runtime-settings-{}-{timestamp}-{sequence}",
+            std::process::id()
+        ));
+        let mut database = Database::open(root.join("traffic.sqlite3")).unwrap();
+        database.set_setting("poll_seconds", "7").unwrap();
+        database.set_setting("app_granularity", "5m").unwrap();
+        let now = Local::now().timestamp();
+        crate::investigation::start(&mut database, now, 600, 7, "5m").unwrap();
+
+        let active = RuntimeSettings::load(&database).unwrap();
+        assert_eq!(active.poll_seconds, 1);
+        assert_eq!(active.app_bucket_seconds, 60);
+        assert_eq!(active.investigation_until, Some(now + 600));
+        assert_eq!(
+            database.setting("poll_seconds").unwrap().as_deref(),
+            Some("7")
+        );
+        assert_eq!(
+            database.setting("app_granularity").unwrap().as_deref(),
+            Some("5m")
+        );
+
+        crate::investigation::stop(&mut database).unwrap();
+        let restored = RuntimeSettings::load(&database).unwrap();
+        assert_eq!(restored.poll_seconds, 7);
+        assert_eq!(restored.app_bucket_seconds, 300);
+        assert_eq!(restored.investigation_until, None);
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
