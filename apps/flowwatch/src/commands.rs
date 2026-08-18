@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use unicode_width::UnicodeWidthStr;
 
 const LAUNCHCTL: &str = "/bin/launchctl";
 
@@ -278,8 +279,11 @@ fn apps(paths: &AppPaths, args: QueryArgs) -> Result<()> {
         );
     }
     println!(
-        "{:<4} {:>11} {:>11} {:>11}  应用",
-        "序号", "上传", "下载", "合计"
+        "{} {} {} {}  应用",
+        table_left("序号", 4),
+        table_right("上传", 11),
+        table_right("下载", 11),
+        table_right("合计", 11),
     );
     for (index, row) in rows.iter().enumerate() {
         let identity_summary = if row.identity_count > 1 || row.executable_paths.len() > 1 {
@@ -291,12 +295,16 @@ fn apps(paths: &AppPaths, args: QueryArgs) -> Result<()> {
         } else {
             String::new()
         };
+        let rank = (index + 1).to_string();
+        let upload = human_bytes(row.upload());
+        let download = human_bytes(row.download());
+        let total = human_bytes(row.upload().saturating_add(row.download()));
         println!(
-            "{:<4} {:>11} {:>11} {:>11}  {}{} [{}]",
-            index + 1,
-            human_bytes(row.upload()),
-            human_bytes(row.download()),
-            human_bytes(row.upload().saturating_add(row.download())),
+            "{} {} {} {}  {}{} [{}]",
+            table_left(&rank, 4),
+            table_right(&upload, 11),
+            table_right(&download, 11),
+            table_right(&total, 11),
             display_app_name(&row.app.name),
             identity_summary,
             sources(row),
@@ -325,16 +333,22 @@ fn interfaces(paths: &AppPaths, args: QueryArgs) -> Result<()> {
         println!("统计精度：显示与所选范围有重叠的每分钟记录。");
     }
     println!(
-        "{:<12} {:>12} {:>12} {:>12}",
-        "网卡", "上传", "下载", "合计"
+        "{} {} {} {}",
+        table_left("网卡", 12),
+        table_right("上传", 12),
+        table_right("下载", 12),
+        table_right("合计", 12),
     );
     for row in &rows {
+        let upload = human_bytes(row.upload);
+        let download = human_bytes(row.download);
+        let total = human_bytes(row.upload.saturating_add(row.download));
         println!(
-            "{:<12} {:>12} {:>12} {:>12}",
-            row.interface,
-            human_bytes(row.upload),
-            human_bytes(row.download),
-            human_bytes(row.upload.saturating_add(row.download)),
+            "{} {} {} {}",
+            table_left(&row.interface, 12),
+            table_right(&upload, 12),
+            table_right(&download, 12),
+            table_right(&total, 12),
         );
     }
     if rows.is_empty() {
@@ -360,16 +374,23 @@ fn spikes(paths: &AppPaths, args: QueryArgs) -> Result<()> {
         println!("统计精度：显示与所选范围有重叠的每分钟记录。");
     }
     println!(
-        "{:<20} {:>12} {:>12} {:>12}",
-        "时间", "上传", "下载", "合计"
+        "{} {} {} {}",
+        table_left("时间", 20),
+        table_right("上传", 12),
+        table_right("下载", 12),
+        table_right("合计", 12),
     );
     for row in &rows {
+        let timestamp = format_timestamp(row.bucket);
+        let upload = human_bytes(row.upload);
+        let download = human_bytes(row.download);
+        let total = human_bytes(row.upload.saturating_add(row.download));
         println!(
-            "{:<20} {:>12} {:>12} {:>12}",
-            format_timestamp(row.bucket),
-            human_bytes(row.upload),
-            human_bytes(row.download),
-            human_bytes(row.upload.saturating_add(row.download)),
+            "{} {} {} {}",
+            table_left(&timestamp, 20),
+            table_right(&upload, 12),
+            table_right(&download, 12),
+            table_right(&total, 12),
         );
     }
     if rows.is_empty() {
@@ -410,8 +431,12 @@ fn gaps(paths: &AppPaths, args: QueryArgs) -> Result<()> {
         );
     }
     println!(
-        "{:<20} {:>12} {:>12} {:>12} {:>12}",
-        "时间段", "实际总量", "已识别", "未识别", "Clash未识别"
+        "{} {} {} {} {}",
+        table_left("时间段", 20),
+        table_right("实际总量", 12),
+        table_right("已识别", 12),
+        table_right("未识别", 12),
+        table_right("Clash未识别", 12),
     );
     for row in &rows {
         let physical = row.physical_upload.saturating_add(row.physical_download);
@@ -426,13 +451,18 @@ fn gaps(paths: &AppPaths, args: QueryArgs) -> Result<()> {
                 row.clash_attributed_upload
                     .saturating_add(row.clash_attributed_download),
             );
+        let timestamp = format_timestamp(row.bucket);
+        let physical = human_bytes(physical);
+        let attributed = human_bytes(attributed);
+        let gap = human_bytes(gap);
+        let clash_gap = human_bytes(clash_gap);
         println!(
-            "{:<20} {:>12} {:>12} {:>12} {:>12}",
-            format_timestamp(row.bucket),
-            human_bytes(physical),
-            human_bytes(attributed),
-            human_bytes(gap),
-            human_bytes(clash_gap),
+            "{} {} {} {} {}",
+            table_left(&timestamp, 20),
+            table_right(&physical, 12),
+            table_right(&attributed, 12),
+            table_right(&gap, 12),
+            table_right(&clash_gap, 12),
         );
     }
     if rows.is_empty() {
@@ -1039,6 +1069,20 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
+fn table_left(value: &str, width: usize) -> String {
+    format!(
+        "{value}{}",
+        " ".repeat(width.saturating_sub(UnicodeWidthStr::width(value)))
+    )
+}
+
+fn table_right(value: &str, width: usize) -> String {
+    format!(
+        "{}{value}",
+        " ".repeat(width.saturating_sub(UnicodeWidthStr::width(value)))
+    )
+}
+
 fn format_timestamp(timestamp: i64) -> String {
     Local
         .timestamp_opt(timestamp, 0)
@@ -1393,6 +1437,20 @@ mod tests {
     fn formats_byte_units() {
         assert_eq!(human_bytes(999), "999 B");
         assert_eq!(human_bytes(1_536), "1.5 KiB");
+    }
+
+    #[test]
+    fn table_cells_use_terminal_display_width() {
+        assert_eq!(UnicodeWidthStr::width(table_left("序号", 4).as_str()), 4);
+        assert_eq!(UnicodeWidthStr::width(table_right("上传", 11).as_str()), 11);
+        assert_eq!(
+            UnicodeWidthStr::width(table_left("FlowWatch", 12).as_str()),
+            12
+        );
+        assert_eq!(
+            UnicodeWidthStr::width(table_left("网络测速", 10).as_str()),
+            10
+        );
     }
 
     #[test]
