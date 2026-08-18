@@ -105,6 +105,20 @@ const INVESTIGATE_AFTER_HELP: &str = "\
   flowwatch investigate stop
 
 时长可使用 5m、30m、1h、6h 或 24h，范围为 5 分钟到 24 小时。";
+const ALERTS_AFTER_HELP: &str = "\
+提醒规则保存在本机数据库中。达到限额的 80% 和 100% 时各提醒一次。
+
+示例：
+  flowwatch alerts add --daily 10GiB
+  flowwatch alerts add --monthly 100GiB
+  flowwatch alerts add --app \"ChatGPT\" --daily 2GiB
+  flowwatch alerts list
+  flowwatch alerts disable 1
+  flowwatch alerts enable 1
+  flowwatch alerts remove 1
+  flowwatch alerts test
+
+容量支持 B、KiB、MiB、GiB、TiB，也支持 KB、MB、GB、TB。应用限额只统计已识别到的应用流量。";
 const APPS_AFTER_HELP: &str = "\
 示例：
   flowwatch apps
@@ -534,6 +548,48 @@ mod tests {
         assert!(help.contains("到期后自动恢复原设置"));
         assert!(help.contains("flowwatch investigate stop"));
     }
+
+    #[test]
+    fn alert_sizes_and_commands_are_validated_during_parsing() {
+        assert_eq!(parse_byte_size("1KiB").unwrap(), 1_024);
+        assert_eq!(parse_byte_size("1.5GiB").unwrap(), 1_610_612_736);
+        assert_eq!(parse_byte_size("2GB").unwrap(), 2_000_000_000);
+        assert!(parse_byte_size("10").is_err());
+        assert!(parse_byte_size("0B").is_err());
+        assert!(parse_byte_size("999999999999999999999TiB").is_err());
+        assert!(Cli::try_parse_from(["flowwatch", "alerts", "add", "--daily", "10GiB"]).is_ok());
+        assert!(
+            Cli::try_parse_from([
+                "flowwatch",
+                "alerts",
+                "add",
+                "--app",
+                "ChatGPT",
+                "--monthly",
+                "100GB",
+            ])
+            .is_ok()
+        );
+        assert!(Cli::try_parse_from(["flowwatch", "alerts", "add"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "flowwatch",
+                "alerts",
+                "add",
+                "--daily",
+                "1GiB",
+                "--monthly",
+                "10GiB",
+            ])
+            .is_err()
+        );
+        let error = localized_command()
+            .try_get_matches_from(["flowwatch", "help", "alerts"])
+            .unwrap_err();
+        let help = error.to_string();
+        assert!(help.contains("达到限额的 80% 和 100%"));
+        assert!(help.contains("flowwatch alerts add --app \"ChatGPT\""));
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -556,6 +612,9 @@ pub enum Command {
     /// 临时提高采样精度，并在到期后自动恢复。
     #[command(after_help = INVESTIGATE_AFTER_HELP)]
     Investigate(InvestigateArgs),
+    /// 设置每日、每月或单个应用的流量限额和本机通知。
+    #[command(after_help = ALERTS_AFTER_HELP)]
+    Alerts(AlertsArgs),
     /// 按上传、下载或总量查看应用排行。
     #[command(after_help = APPS_AFTER_HELP)]
     Apps(AppsArgs),
@@ -773,6 +832,59 @@ pub enum InvestigateCommand {
     Stop,
 }
 
+#[derive(Debug, Args)]
+pub struct AlertsArgs {
+    #[command(subcommand)]
+    pub command: AlertsCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AlertsCommand {
+    /// 新增每日或每月流量限额。
+    Add {
+        /// 每日限额，例如 10GiB；不能与 --monthly 同时使用。
+        #[arg(
+            long,
+            value_name = "容量",
+            value_parser = parse_byte_size,
+            required_unless_present = "monthly",
+            conflicts_with = "monthly",
+            help_heading = "选项"
+        )]
+        daily: Option<u64>,
+        /// 每月限额，例如 100GiB；不能与 --daily 同时使用。
+        #[arg(
+            long,
+            value_name = "容量",
+            value_parser = parse_byte_size,
+            help_heading = "选项"
+        )]
+        monthly: Option<u64>,
+        /// 只统计指定应用已识别到的流量。
+        #[arg(long, value_name = "应用", help_heading = "选项")]
+        app: Option<String>,
+    },
+    /// 查看全部提醒规则。
+    List,
+    /// 暂停一条提醒规则，但保留设置。
+    Disable {
+        #[arg(value_name = "编号", help_heading = "参数")]
+        id: i64,
+    },
+    /// 恢复一条已暂停的提醒规则。
+    Enable {
+        #[arg(value_name = "编号", help_heading = "参数")]
+        id: i64,
+    },
+    /// 永久删除一条提醒规则。
+    Remove {
+        #[arg(value_name = "编号", help_heading = "参数")]
+        id: i64,
+    },
+    /// 立即发送一条测试通知。
+    Test,
+}
+
 #[derive(Debug, Clone, Args)]
 pub struct ChartArgs {
     #[command(flatten)]
@@ -905,6 +1017,59 @@ fn parse_investigation_duration(raw: &str) -> Result<u64, String> {
         return Err("调查时长必须在 5 分钟到 24 小时之间".to_string());
     }
     Ok(seconds)
+}
+
+fn parse_byte_size(raw: &str) -> Result<u64, String> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return Err("容量不能为空，例如 10GiB".to_string());
+    }
+    let split = value
+        .find(|character: char| !character.is_ascii_digit() && character != '.')
+        .unwrap_or(value.len());
+    let (number, unit) = value.split_at(split);
+    if number.is_empty() || number.matches('.').count() > 1 {
+        return Err("容量格式无效，例如 500MiB 或 10GiB".to_string());
+    }
+    let multiplier = match unit.trim().to_ascii_lowercase().as_str() {
+        "b" => 1u128,
+        "kib" => 1u128 << 10,
+        "mib" => 1u128 << 20,
+        "gib" => 1u128 << 30,
+        "tib" => 1u128 << 40,
+        "kb" => 1_000u128,
+        "mb" => 1_000_000u128,
+        "gb" => 1_000_000_000u128,
+        "tb" => 1_000_000_000_000u128,
+        _ => return Err("容量单位必须是 B、KiB、MiB、GiB、TiB、KB、MB、GB 或 TB".to_string()),
+    };
+    let (whole, fraction) = number.split_once('.').unwrap_or((number, ""));
+    let whole = whole
+        .parse::<u128>()
+        .map_err(|_| "容量数值无效".to_string())?;
+    let scale = 10u128
+        .checked_pow(fraction.len() as u32)
+        .ok_or_else(|| "容量小数位过多".to_string())?;
+    let fraction = if fraction.is_empty() {
+        0
+    } else {
+        fraction
+            .parse::<u128>()
+            .map_err(|_| "容量数值无效".to_string())?
+    };
+    let scaled = whole
+        .checked_mul(scale)
+        .and_then(|value| value.checked_add(fraction))
+        .and_then(|value| value.checked_mul(multiplier))
+        .ok_or_else(|| "容量过大".to_string())?;
+    let bytes = scaled / scale;
+    if bytes == 0 {
+        return Err("容量必须大于 0 B".to_string());
+    }
+    if bytes > i64::MAX as u128 {
+        return Err("容量过大".to_string());
+    }
+    Ok(bytes as u64)
 }
 
 fn parse_bounded_usize(

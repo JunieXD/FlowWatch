@@ -1,3 +1,4 @@
+mod alerts;
 mod chart;
 mod clash_config;
 mod cli;

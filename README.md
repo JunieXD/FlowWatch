@@ -79,6 +79,23 @@ flowwatch investigate stop
 
 调查模式使用每秒采样和每分钟应用明细，允许时长为 5 分钟到 24 小时。原设置不会被覆盖；到期、手动停止、程序重启或 Mac 重启后都会恢复。高频采样会临时增加 CPU 使用，只应在排查问题时开启。
 
+### 设置流量提醒
+
+提醒由后台采集器在每次保存数据后检查，不会额外提高采样频率。达到限额的 80% 时预警，达到 100% 时再提醒一次；每天和每月会分别重新计算。
+
+```sh
+flowwatch alerts add --daily 10GiB
+flowwatch alerts add --monthly 100GiB
+flowwatch alerts add --app "ChatGPT" --daily 2GiB
+flowwatch alerts list
+flowwatch alerts disable 1
+flowwatch alerts enable 1
+flowwatch alerts remove 1
+flowwatch alerts test
+```
+
+容量可写成 `B`、`KiB`、`MiB`、`GiB`、`TiB`，也支持十进制的 `KB`、`MB`、`GB`、`TB`。应用限额只统计已经识别到该应用的流量，FlowWatch 会在通知中明确提示这项限制。
+
 ### 查看流量趋势
 
 ```sh
@@ -140,6 +157,7 @@ Clash 并非必需。不开系统代理、不使用 Clash 时，标准模式仍�
 | `flowwatch explain` | 分析指定或最高流量时段的主要应用和未识别流量。 |
 | `flowwatch report` | 一次生成总量、主要应用、高峰和数据说明。 |
 | `flowwatch investigate` | 临时提高采样精度，并按时自动恢复。 |
+| `flowwatch alerts` | 设置、查看、暂停和测试流量限额提醒。 |
 | `flowwatch apps` | 按上传、下载或总量查看应用排行。 |
 | `flowwatch app` | 查看单个应用的流量、身份、路径和最高时段。 |
 | `flowwatch interfaces` | 查看各物理网卡的实际流量。 |

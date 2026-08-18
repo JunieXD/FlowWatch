@@ -1,8 +1,9 @@
 use crate::chart as terminal_chart;
 use crate::clash_config::read_clash_config;
 use crate::cli::{
-    AppArgs, AppGranularity, AppsArgs, ChartArgs, Cli, Command as CliCommand, ConfigCommand,
-    ExplainArgs, InstallArgs, InvestigateCommand, QueryArgs, ReportArgs, SortBy, TimeRangeArgs,
+    AlertsCommand, AppArgs, AppGranularity, AppsArgs, ChartArgs, Cli, Command as CliCommand,
+    ConfigCommand, ExplainArgs, InstallArgs, InvestigateCommand, QueryArgs, ReportArgs, SortBy,
+    TimeRangeArgs,
 };
 use crate::collector::{Collector, RuntimeSettings, acquire_lock};
 use crate::paths::{AGENT_LABEL, AppPaths};
@@ -39,6 +40,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         CliCommand::Explain(args) => explain(&paths, args),
         CliCommand::Report(args) => report(&paths, args),
         CliCommand::Investigate(args) => investigate(&paths, args.command),
+        CliCommand::Alerts(args) => alerts(&paths, args.command),
         CliCommand::Apps(args) => apps(&paths, args),
         CliCommand::App(args) => app(&paths, args),
         CliCommand::Interfaces(args) => interfaces(&paths, args),
@@ -49,6 +51,126 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         CliCommand::Uninstall(args) => uninstall(&paths, args.purge_data),
         CliCommand::Config(args) => configure(&paths, args.command),
     }
+}
+
+fn alerts(paths: &AppPaths, command: AlertsCommand) -> Result<()> {
+    let mut database = Database::open(&paths.database)?;
+    match command {
+        AlertsCommand::Add {
+            daily,
+            monthly,
+            app,
+        } => {
+            let (period, threshold) = match (daily, monthly) {
+                (Some(value), None) => ("daily", value),
+                (None, Some(value)) => ("monthly", value),
+                _ => bail!("必须且只能指定 --daily 或 --monthly"),
+            };
+            let (ids, app_name) = if let Some(selector) = app {
+                let meta = database.meta()?;
+                let start = attribution_window_start(&meta, 0);
+                let rows = Database::group_apps_for_display(
+                    database.query_apps(start, Local::now().timestamp().saturating_add(1))?,
+                );
+                let selected = select_app(&rows, &selector)?;
+                (
+                    selected.identity_ids,
+                    display_app_name(&selected.app.name).to_string(),
+                )
+            } else {
+                (Vec::new(), String::new())
+            };
+            let id = database.add_alert_rule(
+                period,
+                &ids,
+                &app_name,
+                threshold,
+                Local::now().timestamp(),
+            )?;
+            println!(
+                "已添加提醒 #{id}：{} {}限额 {}。",
+                if app_name.is_empty() {
+                    "这台 Mac".to_string()
+                } else {
+                    format!("应用“{app_name}”")
+                },
+                if period == "daily" {
+                    "每日"
+                } else {
+                    "每月"
+                },
+                human_bytes(threshold)
+            );
+            if !ids.is_empty() {
+                println!("说明：应用限额只统计已识别到该应用的流量，实际用量可能更高。");
+            }
+            println!("达到 80% 和 100% 时会各提醒一次。");
+            Ok(())
+        }
+        AlertsCommand::List => {
+            let rules = database.alert_rules()?;
+            println!("流量提醒");
+            if rules.is_empty() {
+                println!("还没有提醒规则。可运行 flowwatch alerts add --daily 10GiB 添加。");
+                return Ok(());
+            }
+            println!(
+                "{} {} {} {} {}",
+                table_right("编号", 6),
+                table_left("范围", 24),
+                table_left("周期", 8),
+                table_right("限额", 12),
+                table_left("状态", 6),
+            );
+            for rule in rules {
+                let scope = if rule.app_ids.is_empty() {
+                    "这台 Mac".to_string()
+                } else {
+                    rule.app_name
+                };
+                let threshold = human_bytes(rule.threshold_bytes);
+                println!(
+                    "{} {} {} {} {}",
+                    table_right(&rule.id.to_string(), 6),
+                    table_left(&scope, 24),
+                    table_left(
+                        if rule.period == "daily" {
+                            "每日"
+                        } else {
+                            "每月"
+                        },
+                        8
+                    ),
+                    table_right(&threshold, 12),
+                    table_left(if rule.enabled { "启用" } else { "暂停" }, 6),
+                );
+            }
+            Ok(())
+        }
+        AlertsCommand::Disable { id } => set_alert_enabled(&mut database, id, false),
+        AlertsCommand::Enable { id } => set_alert_enabled(&mut database, id, true),
+        AlertsCommand::Remove { id } => {
+            if database.remove_alert_rule(id)? {
+                println!("已删除提醒 #{id}。");
+                Ok(())
+            } else {
+                bail!("没有编号为 {id} 的提醒规则")
+            }
+        }
+        AlertsCommand::Test => {
+            crate::alerts::send_test_notification(&crate::alerts::MacNotifier)?;
+            println!("测试通知已发送。若没有看到，请检查 macOS 的通知设置。");
+            Ok(())
+        }
+    }
+}
+
+fn set_alert_enabled(database: &mut Database, id: i64, enabled: bool) -> Result<()> {
+    if !database.set_alert_rule_enabled(id, enabled)? {
+        bail!("没有编号为 {id} 的提醒规则");
+    }
+    println!("已{}提醒 #{id}。", if enabled { "启用" } else { "暂停" });
+    Ok(())
 }
 
 fn chart(paths: &AppPaths, args: ChartArgs) -> Result<()> {
@@ -2247,6 +2369,7 @@ fn print_collector_errors(meta: &std::collections::BTreeMap<String, String>) {
         ("网卡计数", "interface_error"),
         ("应用采样", "process_error"),
         ("Clash 数据来源", "clash_error"),
+        ("流量提醒", "alert_error"),
     ] {
         if let Some(error) = meta.get(key).filter(|error| !error.is_empty()) {
             println!("  警告：{label}：{error}");

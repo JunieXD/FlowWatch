@@ -94,6 +94,7 @@ pub struct Collector {
     interface_error: String,
     process_error: String,
     clash_error: String,
+    alert_error: String,
     active_process_flows: usize,
     tracked_process_flows: usize,
     nettop_restarts: u64,
@@ -168,6 +169,7 @@ impl Collector {
             interface_error: String::new(),
             process_error: String::new(),
             clash_error: String::new(),
+            alert_error: String::new(),
             active_process_flows: 0,
             tracked_process_flows: 0,
             nettop_restarts: 0,
@@ -415,6 +417,7 @@ impl Collector {
             ("interface_error".into(), self.interface_error.clone()),
             ("process_error".into(), self.process_error.clone()),
             ("clash_error".into(), self.clash_error.clone()),
+            ("alert_error".into(), self.alert_error.clone()),
             (
                 "active_process_flows".into(),
                 self.active_process_flows.to_string(),
@@ -481,6 +484,21 @@ impl Collector {
             app_bucket_seconds: self.settings.app_bucket_seconds,
             ..FlushBatch::default()
         };
+        let alert_error = match crate::alerts::check_and_notify(
+            &mut self.database,
+            now,
+            &crate::alerts::MacNotifier,
+        ) {
+            Ok(_) => String::new(),
+            Err(error) => truncate_error(&error),
+        };
+        if alert_error != self.alert_error {
+            self.database.set_meta(&BTreeMap::from([(
+                "alert_error".into(),
+                alert_error.clone(),
+            )]))?;
+            self.alert_error = alert_error;
+        }
         Ok(())
     }
 }

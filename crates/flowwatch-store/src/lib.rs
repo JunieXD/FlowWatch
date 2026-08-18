@@ -8,7 +8,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 #[derive(Debug, Default)]
 pub struct FlushBatch {
@@ -97,6 +97,17 @@ pub struct AttributionGap {
     pub clash_actor_upload: u64,
     pub clash_actor_download: u64,
     pub clash_actor_bytes_known: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AlertRule {
+    pub id: i64,
+    pub period: String,
+    pub app_ids: Vec<String>,
+    pub app_name: String,
+    pub threshold_bytes: u64,
+    pub enabled: bool,
+    pub created_at: i64,
 }
 
 pub struct Database {
@@ -223,6 +234,24 @@ impl Database {
                 actor_upload INTEGER,
                 actor_download INTEGER
             );
+
+            CREATE TABLE IF NOT EXISTS alert_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                period TEXT NOT NULL CHECK (period IN ('daily', 'monthly')),
+                app_ids TEXT NOT NULL,
+                app_name TEXT NOT NULL,
+                threshold_bytes INTEGER NOT NULL CHECK (threshold_bytes > 0),
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS alert_events (
+                rule_id INTEGER NOT NULL,
+                period_start INTEGER NOT NULL,
+                stage INTEGER NOT NULL CHECK (stage IN (80, 100)),
+                notified_at INTEGER NOT NULL,
+                PRIMARY KEY (rule_id, period_start, stage)
+            ) WITHOUT ROWID;
             ",
         )?;
         self.ensure_proxy_actor_columns()?;
@@ -281,6 +310,104 @@ impl Database {
         self.setting("clash_config")?
             .map(|raw| serde_json::from_str(&raw).context("无法解析 Clash 设置"))
             .transpose()
+    }
+
+    pub fn add_alert_rule(
+        &mut self,
+        period: &str,
+        app_ids: &[String],
+        app_name: &str,
+        threshold_bytes: u64,
+        created_at: i64,
+    ) -> Result<i64> {
+        self.connection.execute(
+            "INSERT INTO alert_rules(
+                period, app_ids, app_name, threshold_bytes, enabled, created_at
+             ) VALUES (?1, ?2, ?3, ?4, 1, ?5)",
+            params![
+                period,
+                serde_json::to_string(app_ids)?,
+                app_name,
+                sql_u64(threshold_bytes),
+                created_at,
+            ],
+        )?;
+        Ok(self.connection.last_insert_rowid())
+    }
+
+    pub fn alert_rules(&self) -> Result<Vec<AlertRule>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, period, app_ids, app_name, threshold_bytes, enabled, created_at
+             FROM alert_rules ORDER BY id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                db_u64(row.get::<_, i64>(4)?),
+                row.get::<_, bool>(5)?,
+                row.get::<_, i64>(6)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (id, period, app_ids, app_name, threshold_bytes, enabled, created_at) = row?;
+            Ok(AlertRule {
+                id,
+                period,
+                app_ids: serde_json::from_str(&app_ids)
+                    .with_context(|| format!("提醒规则 {id} 的应用 ID 无效"))?,
+                app_name,
+                threshold_bytes,
+                enabled,
+                created_at,
+            })
+        })
+        .collect()
+    }
+
+    pub fn remove_alert_rule(&mut self, id: i64) -> Result<bool> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute("DELETE FROM alert_events WHERE rule_id=?1", [id])?;
+        let removed = transaction.execute("DELETE FROM alert_rules WHERE id=?1", [id])? > 0;
+        transaction.commit()?;
+        Ok(removed)
+    }
+
+    pub fn set_alert_rule_enabled(&mut self, id: i64, enabled: bool) -> Result<bool> {
+        Ok(self.connection.execute(
+            "UPDATE alert_rules SET enabled=?2 WHERE id=?1",
+            params![id, enabled],
+        )? > 0)
+    }
+
+    pub fn alert_event_exists(&self, rule_id: i64, period_start: i64, stage: u8) -> Result<bool> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM alert_events
+                    WHERE rule_id=?1 AND period_start=?2 AND stage=?3
+                 )",
+                params![rule_id, period_start, stage],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn record_alert_event(
+        &mut self,
+        rule_id: i64,
+        period_start: i64,
+        stage: u8,
+        notified_at: i64,
+    ) -> Result<()> {
+        self.connection.execute(
+            "INSERT OR IGNORE INTO alert_events(rule_id, period_start, stage, notified_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![rule_id, period_start, stage, notified_at],
+        )?;
+        Ok(())
     }
 
     pub fn meta(&self) -> Result<BTreeMap<String, String>> {
@@ -1695,6 +1822,38 @@ mod tests {
         database.set_clash_config(&config).unwrap();
         let loaded = database.clash_config().unwrap().unwrap();
         assert_eq!(loaded.secret, config.secret);
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn alert_rules_and_events_round_trip_and_delete_together() {
+        let (root, mut database) = temporary_database();
+        let app_ids = vec!["bundle:example".to_string(), "path:/example".to_string()];
+        let id = database
+            .add_alert_rule("daily", &app_ids, "Example", 1_000, 123)
+            .unwrap();
+        let rules = database.alert_rules().unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].id, id);
+        assert_eq!(rules[0].app_ids, app_ids);
+        assert_eq!(rules[0].threshold_bytes, 1_000);
+        assert!(rules[0].enabled);
+
+        assert!(database.set_alert_rule_enabled(id, false).unwrap());
+        assert!(!database.alert_rules().unwrap()[0].enabled);
+        assert!(database.set_alert_rule_enabled(id, true).unwrap());
+        assert!(database.alert_rules().unwrap()[0].enabled);
+        assert!(!database.set_alert_rule_enabled(id + 1, false).unwrap());
+
+        assert!(!database.alert_event_exists(id, 100, 80).unwrap());
+        database.record_alert_event(id, 100, 80, 150).unwrap();
+        assert!(database.alert_event_exists(id, 100, 80).unwrap());
+        database.record_alert_event(id, 100, 80, 200).unwrap();
+        assert!(database.remove_alert_rule(id).unwrap());
+        assert!(database.alert_rules().unwrap().is_empty());
+        assert!(!database.alert_event_exists(id, 100, 80).unwrap());
+        assert!(!database.remove_alert_rule(id).unwrap());
         drop(database);
         std::fs::remove_dir_all(root).unwrap();
     }
