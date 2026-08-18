@@ -1,0 +1,101 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: validate release metadata
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: release
+        name: Resolve release tag
+        shell: bash
+        run: |
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            tag="$GITHUB_REF_NAME"
+          else
+            tag="v${version}"
+          fi
+          scripts/check-release.sh "$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: ${{ matrix.asset_name }}
+    needs: validate
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            asset_name: flowwatch-aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            asset_name: flowwatch-x86_64-apple-darwin
+    env:
+      TARGET: ${{ matrix.target }}
+      ASSET_NAME: ${{ matrix.asset_name }}
+      RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.88.0 --profile minimal --target "$TARGET"
+      - name: Build
+        run: cargo +1.88.0 build --locked --release --target "$TARGET" --workspace
+      - name: Check binary version
+        run: scripts/check-release.sh "$RELEASE_TAG" "target/${TARGET}/release/flowwatch"
+      - name: Package artifact
+        shell: bash
+        run: |
+          mkdir -p dist
+          tar -czf "dist/${ASSET_NAME}.tar.gz" \
+            -C "target/${TARGET}/release" flowwatch \
+            -C "$GITHUB_WORKSPACE" README.md README.zh-CN.md LICENSE
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.asset_name }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - validate
+      - build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v7
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          gh release create "$TAG" \
+            --verify-tag \
+            --title "FlowWatch ${TAG}" \
+            --notes-file "docs/releases/${TAG}.md" \
+            dist/*

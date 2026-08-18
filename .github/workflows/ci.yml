@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: stable quality checks
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run Clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Run tests
+        run: cargo test --locked --workspace
+      - name: Build release binary
+        run: cargo build --locked --release --workspace
+      - name: Validate release metadata
+        run: |
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
+          scripts/check-release.sh "v${version}" target/release/flowwatch
+      - name: Validate shell scripts
+        run: |
+          sh -n scripts/install.sh
+          sh -n scripts/check-release.sh
+          sh -n scripts/test-installer.sh
+      - name: Test installer verification
+        run: scripts/test-installer.sh
+
+  msrv:
+    name: Rust 1.88 on Intel macOS
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install minimum Rust toolchain
+        run: rustup toolchain install 1.88.0 --profile minimal
+      - name: Test minimum supported Rust version
+        run: cargo +1.88.0 test --locked --workspace
+      - name: Build minimum supported Rust version
+        run: cargo +1.88.0 build --locked --release --workspace

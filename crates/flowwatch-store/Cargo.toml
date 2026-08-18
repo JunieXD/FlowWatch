@@ -1,0 +1,19 @@
+[package]
+name = "flowwatch-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+flowwatch-core.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true

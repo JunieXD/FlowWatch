@@ -1,0 +1,24 @@
+name: Feature request
+description: Suggest a focused improvement to FlowWatch
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What traffic-accounting or operational problem are you trying to solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: tradeoffs
+    attributes:
+      label: Accuracy, permission, and resource tradeoffs
+      description: Note whether the idea needs elevated privileges, packet metadata, signing, or more storage.

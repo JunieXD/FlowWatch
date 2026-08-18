@@ -1,0 +1,56 @@
+name: Bug report
+description: Report incorrect accounting, installation problems, or crashes
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not attach your production SQLite database, Clash configuration, controller secret, remote domains, or IP addresses.
+  - type: input
+    id: version
+    attributes:
+      label: FlowWatch version
+      placeholder: "flowwatch 0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version and Mac model
+      placeholder: "macOS 15.6, Apple M3"
+    validations:
+      required: true
+  - type: dropdown
+    id: traffic
+    attributes:
+      label: Traffic path
+      options:
+        - Direct
+        - Clash/Mihomo system proxy
+        - Clash/Mihomo TUN
+        - Mixed or unknown
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Include expected and actual behavior with approximate, non-sensitive totals.
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Redacted doctor output
+      description: Paste `flowwatch doctor`. Confirm it contains no private information before submitting.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+    validations:
+      required: true

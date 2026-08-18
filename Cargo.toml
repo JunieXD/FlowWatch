@@ -1,0 +1,47 @@
+[workspace]
+members = [
+    "apps/flowwatch",
+    "crates/flowwatch-clash",
+    "crates/flowwatch-core",
+    "crates/flowwatch-macos",
+    "crates/flowwatch-store",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.88"
+authors = ["JunieXD"]
+description = "Lightweight, local-first per-application network accounting for macOS"
+repository = "https://github.com/JunieXD/FlowWatch"
+homepage = "https://github.com/JunieXD/FlowWatch"
+readme = "README.md"
+keywords = ["macos", "network-monitoring", "traffic", "sqlite", "clash"]
+categories = ["command-line-utilities", "network-programming"]
+publish = false
+
+[workspace.dependencies]
+anyhow = "1.0"
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+clap = { version = "4.6.6", features = ["derive"] }
+csv = "1.4.0"
+directories = "6.0.0"
+flowwatch-core = { path = "crates/flowwatch-core" }
+flowwatch-clash = { path = "crates/flowwatch-clash" }
+flowwatch-macos = { path = "crates/flowwatch-macos" }
+flowwatch-store = { path = "crates/flowwatch-store" }
+libc = "0.2"
+minreq = { version = "3.0.0", features = ["json-using-serde"] }
+plist = "1.10.0"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+signal-hook = "0.4.4"
+thiserror = "2.0"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = true
