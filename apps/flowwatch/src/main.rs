@@ -4,6 +4,7 @@ mod clash_config;
 mod cli;
 mod collector;
 mod commands;
+mod dashboard;
 mod investigation;
 mod paths;
 mod update;

@@ -2,8 +2,8 @@ use crate::chart as terminal_chart;
 use crate::clash_config::read_clash_config;
 use crate::cli::{
     AlertsCommand, AppArgs, AppGranularity, AppNamesCommand, AppsArgs, ChartArgs, Cli,
-    Command as CliCommand, ConfigCommand, DataCommand, DataFormat, ExplainArgs, InstallArgs,
-    InvestigateCommand, QueryArgs, ReportArgs, SortBy, TimeRangeArgs, UpdateArgs,
+    Command as CliCommand, ConfigCommand, DashboardArgs, DataCommand, DataFormat, ExplainArgs,
+    InstallArgs, InvestigateCommand, QueryArgs, ReportArgs, SortBy, TimeRangeArgs, UpdateArgs,
 };
 use crate::collector::{Collector, RuntimeSettings, acquire_lock};
 use crate::paths::{AGENT_LABEL, AppPaths};
@@ -52,7 +52,21 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         CliCommand::Config(args) => configure(&paths, args.command),
         CliCommand::Data(args) => data(&paths, args.command),
         CliCommand::Update(args) => update(args),
+        CliCommand::Dashboard(args) => dashboard(&paths, args),
     }
+}
+
+fn dashboard(paths: &AppPaths, args: DashboardArgs) -> Result<()> {
+    validate_time_range(&args.range)?;
+    let range = parse_time_range(&args.range)?;
+    crate::dashboard::run(
+        &paths.database,
+        crate::dashboard::DashboardRange {
+            start: range.start,
+            end: range.end,
+            label: range.label,
+        },
+    )
 }
 
 fn update(args: UpdateArgs) -> Result<()> {

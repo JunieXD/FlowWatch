@@ -246,6 +246,15 @@ const UPDATE_AFTER_HELP: &str = "\
   flowwatch update --version 0.2.0
 
 更新会保留数据库和全部设置。程序不会自动降级，也不会安装预发布版本。";
+const DASHBOARD_AFTER_HELP: &str = "\
+在一个交互式终端界面中查看概览、趋势、应用和异常时段。
+
+示例：
+  flowwatch dashboard
+  flowwatch dashboard --period 24h
+  flowwatch dashboard --date 2026-08-18
+
+Tab 或左右方向键切换视图，上下方向键选择记录，Enter 查看详情，r 刷新，q 退出。";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -705,6 +714,19 @@ mod tests {
         assert!(help.contains("不会自动降级"));
         assert!(help.contains("flowwatch update --check"));
     }
+
+    #[test]
+    fn dashboard_help_lists_views_controls_and_time_ranges() {
+        assert!(Cli::try_parse_from(["flowwatch", "dashboard", "--period", "24h"]).is_ok());
+        assert!(Cli::try_parse_from(["flowwatch", "dashboard", "--date", "2026-08-18"]).is_ok());
+        let error = localized_command()
+            .try_get_matches_from(["flowwatch", "help", "dashboard"])
+            .unwrap_err();
+        let help = error.to_string();
+        assert!(help.contains("概览、趋势、应用和异常时段"));
+        assert!(help.contains("Tab 或左右方向键"));
+        assert!(help.contains("flowwatch dashboard --date 2026-08-18"));
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -763,6 +785,15 @@ pub enum Command {
     /// 检查或安装经过校验的 FlowWatch 正式版本。
     #[command(after_help = UPDATE_AFTER_HELP)]
     Update(UpdateArgs),
+    /// 打开包含概览、趋势、应用和异常时段的交互界面。
+    #[command(after_help = DASHBOARD_AFTER_HELP)]
+    Dashboard(DashboardArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct DashboardArgs {
+    #[command(flatten)]
+    pub range: TimeRangeArgs,
 }
 
 #[derive(Debug, Args)]
