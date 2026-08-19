@@ -262,7 +262,7 @@ flowwatch data compact
 ```sh
 flowwatch update --check
 flowwatch update
-flowwatch update --version 0.2.1
+flowwatch update --version 0.2.2
 ```
 
 更新器只接受 `MAJOR.MINOR.PATCH` 正式版本，自动选择 Apple Silicon 或 Intel 发布包，同时校验发布清单中的 SHA-256 和下载后程序报告的版本。校验全部通过后才由新程序执行安装。自动更新不会降级，也不会修改 SQLite 数据库、Clash 设置、提醒、应用名称或保存期限。

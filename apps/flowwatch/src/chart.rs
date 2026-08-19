@@ -13,18 +13,8 @@ const TOTAL: u8 = 4;
 
 #[derive(Debug, Clone, Copy, Default)]
 struct PlotCell {
-    mask: u8,
-    directions: [LineDirection; 3],
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-enum LineDirection {
-    #[default]
-    Point,
-    Horizontal,
-    Rising,
-    Falling,
-    Vertical,
+    dots: u8,
+    series_mask: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -189,10 +179,9 @@ pub fn render_chart(
 
     let mut output = String::new();
     for (row_index, row) in grid.iter().enumerate() {
-        let tick = row_index == 0 || row_index == height / 2 || row_index + 1 == height;
+        let tick = plot_axis_tick(row_index, height);
         if tick {
-            let value = plot_scale_max(chart).saturating_mul((height - 1 - row_index) as u64)
-                / (height - 1) as u64;
+            let value = plot_axis_value(chart, row_index, height);
             output.push_str(&pad_left(&axis_bytes(value), 9));
             output.push(' ');
             output.push('┤');
@@ -229,7 +218,6 @@ fn build_grid(chart: &PreparedChart, height: usize, plot_width: usize) -> Vec<Ve
         plot_width,
         scale_max,
         |point| point.upload,
-        UPLOAD,
         0,
     );
     draw_series(
@@ -238,7 +226,6 @@ fn build_grid(chart: &PreparedChart, height: usize, plot_width: usize) -> Vec<Ve
         plot_width,
         scale_max,
         |point| point.download,
-        DOWNLOAD,
         1,
     );
     draw_series(
@@ -247,7 +234,6 @@ fn build_grid(chart: &PreparedChart, height: usize, plot_width: usize) -> Vec<Ve
         plot_width,
         scale_max,
         TrafficPoint::total,
-        TOTAL,
         2,
     );
     grid
@@ -263,16 +249,34 @@ fn chart_maximum(chart: &PreparedChart) -> u64 {
 }
 
 pub fn plot_scale_max(chart: &PreparedChart) -> u64 {
-    nice_ceiling(chart_maximum(chart))
+    let maximum = chart_maximum(chart);
+    let padded = maximum.saturating_add(maximum / 10);
+    nice_ceiling(padded)
+}
+
+pub fn plot_axis_tick(row: usize, height: usize) -> bool {
+    if height <= 2 {
+        return true;
+    }
+    row == 0
+        || row == height / 4
+        || row == height / 2
+        || row == height.saturating_mul(3) / 4
+        || row + 1 == height
+}
+
+pub fn plot_axis_value(chart: &PreparedChart, row: usize, height: usize) -> u64 {
+    plot_scale_max(chart).saturating_mul((height.saturating_sub(1).saturating_sub(row)) as u64)
+        / height.saturating_sub(1).max(1) as u64
 }
 
 pub fn legend(color: bool) -> String {
     format!(
-        "{} 上传   {} 下载   {} 合计   {} 交叠",
-        styled("─", "96", color),
-        styled("┄", "94", color),
-        styled("━", "93", color),
-        styled("┼", "97", color),
+        "{}   {}   {}   {}",
+        styled("上传", "96", color),
+        styled("下载", "94", color),
+        styled("合计", "93", color),
+        styled("交叠", "97", color),
     )
 }
 
@@ -336,25 +340,26 @@ fn draw_series<F>(
     plot_width: usize,
     scale_max: u64,
     value: F,
-    mask: u8,
     series_index: usize,
 ) where
     F: Fn(&TrafficPoint) -> Option<u64>,
 {
     let mut previous: Option<(usize, usize, usize)> = None;
+    let subpixel_width = plot_width.saturating_mul(2);
+    let subpixel_height = grid.len().saturating_mul(4);
     for (index, point) in points.iter().enumerate() {
         let Some(value) = value(point) else {
             previous = None;
             continue;
         };
-        let x = point_x(index, points.len(), plot_width);
-        let y = point_y(value, scale_max, grid.len());
+        let x = point_x(index, points.len(), subpixel_width);
+        let y = point_y(value, scale_max, subpixel_height);
         if let Some((previous_index, previous_x, previous_y)) = previous
             && previous_index + 1 == index
         {
-            draw_segment(grid, previous_x, previous_y, x, y, mask, series_index);
+            draw_segment(grid, previous_x, previous_y, x, y, series_index);
         } else {
-            mark_cell(grid, x, y, mask, series_index, LineDirection::Point);
+            mark_pixel(grid, x, y, series_index);
         }
         previous = Some((index, x, y));
     }
@@ -385,43 +390,52 @@ fn draw_segment(
     y0: usize,
     x1: usize,
     y1: usize,
-    mask: u8,
     series_index: usize,
 ) {
-    let dx = x1.abs_diff(x0);
-    let dy = y1.abs_diff(y0);
-    let steps = dx.max(dy).max(1);
-    let direction = line_direction(x0, y0, x1, y1);
-    for step in 0..=steps {
-        let ratio = step as f64 / steps as f64;
-        let x = (x0 as f64 + (x1 as f64 - x0 as f64) * ratio).round() as usize;
-        let y = (y0 as f64 + (y1 as f64 - y0 as f64) * ratio).round() as usize;
-        mark_cell(grid, x, y, mask, series_index, direction);
-    }
-}
+    let mut x = x0 as i64;
+    let mut y = y0 as i64;
+    let target_x = x1 as i64;
+    let target_y = y1 as i64;
+    let dx = (target_x - x).abs();
+    let sx = if x < target_x { 1 } else { -1 };
+    let dy = -(target_y - y).abs();
+    let sy = if y < target_y { 1 } else { -1 };
+    let mut error = dx + dy;
 
-fn mark_cell(
-    grid: &mut [Vec<PlotCell>],
-    x: usize,
-    y: usize,
-    mask: u8,
-    series_index: usize,
-    direction: LineDirection,
-) {
-    if let Some(cell) = grid.get_mut(y).and_then(|row| row.get_mut(x)) {
-        cell.mask |= mask;
-        if let Some(slot) = cell.directions.get_mut(series_index) {
-            *slot = direction;
+    loop {
+        mark_pixel(grid, x as usize, y as usize, series_index);
+        if x == target_x && y == target_y {
+            break;
+        }
+        let twice = error.saturating_mul(2);
+        if twice >= dy {
+            error += dy;
+            x += sx;
+        }
+        if twice <= dx {
+            error += dx;
+            y += sy;
         }
     }
 }
 
-fn line_direction(x0: usize, y0: usize, x1: usize, y1: usize) -> LineDirection {
-    match (x0 == x1, y0.cmp(&y1)) {
-        (true, _) => LineDirection::Vertical,
-        (_, std::cmp::Ordering::Equal) => LineDirection::Horizontal,
-        (_, std::cmp::Ordering::Greater) => LineDirection::Rising,
-        (_, std::cmp::Ordering::Less) => LineDirection::Falling,
+fn mark_pixel(grid: &mut [Vec<PlotCell>], x: usize, y: usize, series_index: usize) {
+    let cell_x = x / 2;
+    let cell_y = y / 4;
+    let bit = match (x % 2, y % 4) {
+        (0, 0) => 0x01,
+        (0, 1) => 0x02,
+        (0, 2) => 0x04,
+        (1, 0) => 0x08,
+        (1, 1) => 0x10,
+        (1, 2) => 0x20,
+        (0, 3) => 0x40,
+        (1, 3) => 0x80,
+        _ => return,
+    };
+    if let Some(cell) = grid.get_mut(cell_y).and_then(|row| row.get_mut(cell_x)) {
+        cell.dots |= bit;
+        cell.series_mask |= 1u8 << series_index;
     }
 }
 
@@ -437,60 +451,21 @@ fn render_cell(cell: PlotCell, color: bool) -> String {
 }
 
 fn cell_glyph(cell: PlotCell) -> PlotGlyph {
-    match cell.mask {
-        0 => PlotGlyph {
+    if cell.dots == 0 {
+        return PlotGlyph {
             symbol: ' ',
             series: None,
-        },
-        UPLOAD => PlotGlyph {
-            symbol: series_symbol(0, cell.directions[0]),
-            series: Some(PlotSeries::Upload),
-        },
-        DOWNLOAD => PlotGlyph {
-            symbol: series_symbol(1, cell.directions[1]),
-            series: Some(PlotSeries::Download),
-        },
-        mask if mask & TOTAL != 0 => PlotGlyph {
-            symbol: series_symbol(2, cell.directions[2]),
-            series: Some(PlotSeries::Total),
-        },
-        _ => PlotGlyph {
-            symbol: overlap_symbol(cell),
-            series: Some(PlotSeries::Overlap),
-        },
+        };
     }
-}
-
-fn overlap_symbol(cell: PlotCell) -> char {
-    if cell
-        .directions
-        .iter()
-        .any(|direction| matches!(direction, LineDirection::Rising | LineDirection::Falling))
-    {
-        '╳'
-    } else if cell
-        .directions
-        .iter()
-        .any(|direction| matches!(direction, LineDirection::Vertical))
-    {
-        '╂'
-    } else {
-        '┼'
-    }
-}
-
-fn series_symbol(series_index: usize, direction: LineDirection) -> char {
-    let (horizontal, vertical, rising, falling, point) = match series_index {
-        0 => ('─', '│', '╱', '╲', '●'),
-        1 => ('┄', '┆', '╱', '╲', '▪'),
-        _ => ('━', '┃', '╱', '╲', '◆'),
-    };
-    match direction {
-        LineDirection::Point => point,
-        LineDirection::Horizontal => horizontal,
-        LineDirection::Rising => rising,
-        LineDirection::Falling => falling,
-        LineDirection::Vertical => vertical,
+    PlotGlyph {
+        symbol: char::from_u32(0x2800 + u32::from(cell.dots)).unwrap_or(' '),
+        series: Some(match cell.series_mask {
+            TOTAL => PlotSeries::Total,
+            mask if mask & TOTAL != 0 => PlotSeries::Total,
+            UPLOAD => PlotSeries::Upload,
+            DOWNLOAD => PlotSeries::Download,
+            _ => PlotSeries::Overlap,
+        }),
     }
 }
 
@@ -668,8 +643,8 @@ mod tests {
         assert!(output.contains('┤'));
         assert!(output.contains('└'));
         assert!(output.contains('─') || output.contains('╱') || output.contains('╲'));
-        assert!(legend(false).contains('┄'));
-        assert!(legend(false).contains('━'));
+        assert!(legend(false).contains("上传"));
+        assert!(legend(false).contains("合计"));
         assert!(!output.contains("\x1b["));
         assert_eq!(output.lines().count(), 10);
         assert!(
@@ -704,22 +679,17 @@ mod tests {
         assert!(
             glyphs
                 .iter()
-                .any(|glyph| matches!(glyph.symbol, '─' | '┄' | '━' | '╱' | '╲' | '│' | '┆' | '┃'))
+                .any(|glyph| ('\u{2800}'..='\u{28ff}').contains(&glyph.symbol))
         );
         let overlap = cell_glyph(PlotCell {
-            mask: UPLOAD | DOWNLOAD,
-            directions: [
-                LineDirection::Horizontal,
-                LineDirection::Horizontal,
-                LineDirection::Point,
-            ],
+            dots: 0x03,
+            series_mask: UPLOAD | DOWNLOAD,
         });
         assert_eq!(overlap.series, Some(PlotSeries::Overlap));
-        assert_eq!(overlap.symbol, '┼');
 
         let total_wins_collision = cell_glyph(PlotCell {
-            mask: UPLOAD | DOWNLOAD | TOTAL,
-            directions: [LineDirection::Point; 3],
+            dots: 0x03,
+            series_mask: UPLOAD | DOWNLOAD | TOTAL,
         });
         assert_eq!(total_wins_collision.series, Some(PlotSeries::Total));
     }

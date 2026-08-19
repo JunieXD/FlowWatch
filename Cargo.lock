@@ -392,7 +392,7 @@ checksum = "d45db016d36b838f563236e9193d0ee6ce38f3f68b6c94e914b4929c96bbb890"
 
 [[package]]
 name = "flowwatch"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -417,7 +417,7 @@ dependencies = [
 
 [[package]]
 name = "flowwatch-clash"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "flowwatch-core",
@@ -428,14 +428,14 @@ dependencies = [
 
 [[package]]
 name = "flowwatch-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "flowwatch-macos"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "cc",
@@ -447,7 +447,7 @@ dependencies = [
 
 [[package]]
 name = "flowwatch-store"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "chrono",

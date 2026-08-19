@@ -1,4 +1,4 @@
-use crate::chart::{PlotSeries, plot_scale_max, prepare_chart, render_plot};
+use crate::chart::{PlotSeries, plot_axis_tick, plot_axis_value, prepare_chart, render_plot};
 use anyhow::{Context, Result, bail};
 use chrono::{Local, TimeZone};
 use crossterm::cursor::{Hide, Show};
@@ -577,13 +577,11 @@ fn draw_trend(frame: &mut Frame<'_>, area: Rect, app: &App) {
     ));
     frame.render_widget(block, area);
     let glyphs = render_plot(&chart, plot_height, plot_width);
-    let scale_max = plot_scale_max(&chart);
     let mut lines = Vec::with_capacity(glyphs.len() + 2);
     for (row_index, row) in glyphs.iter().enumerate() {
-        let tick = row_index == 0 || row_index == glyphs.len() / 2 || row_index + 1 == glyphs.len();
+        let tick = plot_axis_tick(row_index, glyphs.len());
         let mut spans = if tick {
-            let value = scale_max.saturating_mul((glyphs.len() - 1 - row_index) as u64)
-                / (glyphs.len().saturating_sub(1).max(1)) as u64;
+            let value = plot_axis_value(&chart, row_index, glyphs.len());
             vec![Span::raw(format!("{:>9} ┤", human_bytes(value)))]
         } else {
             vec![Span::raw("          │")]
@@ -608,13 +606,13 @@ fn draw_trend(frame: &mut Frame<'_>, area: Rect, app: &App) {
         format_chart_time(app.range.end)
     )));
     lines.push(Line::from(vec![
-        Span::styled("─ 上传", Style::default().fg(app.palette.upload)),
+        Span::styled("上传", Style::default().fg(app.palette.upload)),
         Span::raw("   "),
-        Span::styled("┄ 下载", Style::default().fg(app.palette.download)),
+        Span::styled("下载", Style::default().fg(app.palette.download)),
         Span::raw("   "),
-        Span::styled("━ 合计", Style::default().fg(app.palette.total)),
+        Span::styled("合计", Style::default().fg(app.palette.total)),
         Span::raw("   "),
-        Span::styled("┼ 交叠", Style::default().fg(app.palette.accent)),
+        Span::styled("交叠", Style::default().fg(app.palette.accent)),
     ]));
     frame.render_widget(Paragraph::new(lines), inner);
 }
@@ -1090,8 +1088,8 @@ mod tests {
             .replace(' ', "");
 
         assert!(content.contains("流量趋势·每1分钟的用量"));
-        assert!(content.contains("─上传"));
-        assert!(content.contains("┄下载"));
-        assert!(content.contains("━合计"));
+        assert!(content.contains("上传"));
+        assert!(content.contains("下载"));
+        assert!(content.contains("合计"));
     }
 }
