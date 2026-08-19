@@ -1,3 +1,4 @@
+use crate::chart::{PlotSeries, plot_scale_max, prepare_chart, render_plot};
 use anyhow::{Context, Result, bail};
 use chrono::{Local, TimeZone};
 use crossterm::cursor::{Hide, Show};
@@ -12,11 +13,9 @@ use ratatui::Frame;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::symbols;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Axis, Block, Borders, Cell, Chart, Clear, Dataset, GraphType, Paragraph, Row, Table,
-    TableState, Tabs, Wrap,
+    Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Tabs, Wrap,
 };
 use ratatui::{Terminal, TerminalOptions, Viewport};
 use std::io::{self, IsTerminal};
@@ -26,6 +25,7 @@ use std::time::{Duration, Instant};
 const MINIMUM_WIDTH: u16 = 72;
 const MINIMUM_HEIGHT: u16 = 20;
 const AUTO_REFRESH: Duration = Duration::from_secs(5);
+const DASHBOARD_HELP: &str = "操作：Tab/←→切换 · ↑↓选择 · Enter查看 · r刷新 · Esc关闭 · q退出";
 
 pub struct DashboardRange {
     pub start: i64,
@@ -250,6 +250,7 @@ impl App {
 
 #[derive(Clone, Copy)]
 struct Palette {
+    no_color: bool,
     accent: Color,
     upload: Color,
     download: Color,
@@ -262,6 +263,7 @@ impl Palette {
     fn new(no_color: bool) -> Self {
         if no_color {
             return Self {
+                no_color: true,
                 accent: Color::Reset,
                 upload: Color::Reset,
                 download: Color::Reset,
@@ -271,12 +273,24 @@ impl Palette {
             };
         }
         Self {
+            no_color: false,
             accent: Color::Cyan,
             upload: Color::Green,
             download: Color::Blue,
             total: Color::Yellow,
             muted: Color::DarkGray,
             warning: Color::Red,
+        }
+    }
+
+    fn selected_tab_style(self) -> Style {
+        if self.no_color {
+            Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+        } else {
+            Style::default()
+                .fg(Color::Black)
+                .bg(self.accent)
+                .add_modifier(Modifier::BOLD)
         }
     }
 }
@@ -390,7 +404,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         .constraints([
             Constraint::Length(3),
             Constraint::Min(10),
-            Constraint::Length(1),
+            Constraint::Length(2),
         ])
         .split(area);
     let titles = ["概览", "趋势", "应用", "异常"]
@@ -399,11 +413,7 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
         .collect::<Vec<_>>();
     let tabs = Tabs::new(titles)
         .select(app.view.index())
-        .highlight_style(
-            Style::default()
-                .fg(app.palette.accent)
-                .add_modifier(Modifier::BOLD),
-        )
+        .highlight_style(app.palette.selected_tab_style())
         .divider("  ")
         .block(
             Block::default()
@@ -428,7 +438,11 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
             Style::default().fg(app.palette.muted),
         ))
     };
-    frame.render_widget(Paragraph::new(status), layout[2]);
+    let help = Line::from(Span::styled(
+        DASHBOARD_HELP,
+        Style::default().fg(app.palette.muted),
+    ));
+    frame.render_widget(Paragraph::new(vec![status, help]), layout[2]);
     if app.detail_open {
         draw_detail(frame, app);
     }
@@ -443,6 +457,12 @@ fn draw_overview(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let peak = data.peaks.first();
     let top_app = data.apps.first();
     let lines = vec![
+        Line::from(format!(
+            "统计范围  {} 至 {}",
+            format_timestamp(app.range.start),
+            format_timestamp(app.range.end)
+        )),
+        Line::from(""),
         Line::from(vec![
             Span::raw("采集服务  "),
             Span::styled(
@@ -534,63 +554,69 @@ fn draw_trend(frame: &mut Frame<'_>, area: Rect, app: &App) {
         draw_empty(frame, area, "所选时间内没有网卡流量记录。", "流量趋势");
         return;
     }
-    let points = aggregate_samples(&app.data.traffic, area.width.saturating_sub(12) as usize);
-    let upload = points
-        .iter()
-        .map(|point| ((point.0 - app.range.start) as f64, point.1 as f64))
-        .collect::<Vec<_>>();
-    let download = points
-        .iter()
-        .map(|point| ((point.0 - app.range.start) as f64, point.2 as f64))
-        .collect::<Vec<_>>();
-    let total = points
-        .iter()
-        .map(|point| {
-            (
-                (point.0 - app.range.start) as f64,
-                point.1.saturating_add(point.2) as f64,
-            )
-        })
-        .collect::<Vec<_>>();
-    let maximum = total.iter().map(|point| point.1).fold(1.0f64, f64::max);
-    let duration = app.range.end.saturating_sub(app.range.start).max(1) as f64;
-    let datasets = vec![
-        Dataset::default()
-            .name("上传")
-            .marker(symbols::Marker::Braille)
-            .graph_type(GraphType::Line)
-            .style(Style::default().fg(app.palette.upload))
-            .data(&upload),
-        Dataset::default()
-            .name("下载")
-            .marker(symbols::Marker::Braille)
-            .graph_type(GraphType::Line)
-            .style(Style::default().fg(app.palette.download))
-            .data(&download),
-        Dataset::default()
-            .name("合计")
-            .marker(symbols::Marker::Braille)
-            .graph_type(GraphType::Line)
-            .style(Style::default().fg(app.palette.total))
-            .data(&total),
-    ];
-    let x_labels = vec![
-        Line::from(format_chart_time(app.range.start)),
-        Line::from(format_chart_time(
-            app.range.start + (app.range.end - app.range.start) / 2,
-        )),
-        Line::from(format_chart_time(app.range.end)),
-    ];
-    let y_labels = vec![
-        Line::from("0 B"),
-        Line::from(human_bytes((maximum / 2.0) as u64)),
-        Line::from(human_bytes(maximum as u64)),
-    ];
-    let chart = Chart::new(datasets)
-        .block(Block::default().borders(Borders::ALL).title("流量趋势"))
-        .x_axis(Axis::default().bounds([0.0, duration]).labels(x_labels))
-        .y_axis(Axis::default().bounds([0.0, maximum]).labels(y_labels));
-    frame.render_widget(chart, area);
+    let block = Block::default().borders(Borders::ALL);
+    let inner = block.inner(area);
+    let plot_width = inner.width.saturating_sub(12).max(2) as usize;
+    let plot_height = inner.height.saturating_sub(3).max(2) as usize;
+    let chart = match prepare_chart(
+        &app.data.traffic,
+        app.range.start,
+        app.range.end,
+        None,
+        plot_width,
+    ) {
+        Ok(chart) => chart,
+        Err(error) => {
+            draw_empty(frame, area, &format!("无法绘制趋势图：{error}"), "流量趋势");
+            return;
+        }
+    };
+    let block = block.title(format!(
+        "流量趋势 · 每{}的用量",
+        interval_label(chart.interval_seconds)
+    ));
+    frame.render_widget(block, area);
+    let glyphs = render_plot(&chart, plot_height, plot_width);
+    let scale_max = plot_scale_max(&chart);
+    let mut lines = Vec::with_capacity(glyphs.len() + 2);
+    for (row_index, row) in glyphs.iter().enumerate() {
+        let tick = row_index == 0 || row_index == glyphs.len() / 2 || row_index + 1 == glyphs.len();
+        let mut spans = if tick {
+            let value = scale_max.saturating_mul((glyphs.len() - 1 - row_index) as u64)
+                / (glyphs.len().saturating_sub(1).max(1)) as u64;
+            vec![Span::raw(format!("{:>9} ┤", human_bytes(value)))]
+        } else {
+            vec![Span::raw("          │")]
+        };
+        spans.extend(row.iter().map(|glyph| {
+            let color = match glyph.series {
+                Some(PlotSeries::Upload) => app.palette.upload,
+                Some(PlotSeries::Download) => app.palette.download,
+                Some(PlotSeries::Total) => app.palette.total,
+                Some(PlotSeries::Overlap) => app.palette.accent,
+                None => Color::Reset,
+            };
+            Span::styled(glyph.symbol.to_string(), Style::default().fg(color))
+        }));
+        lines.push(Line::from(spans));
+    }
+    lines.push(Line::from(format!("          └{}", "─".repeat(plot_width))));
+    lines.push(Line::from(format!(
+        "           {}{}{}",
+        format_chart_time(app.range.start),
+        " ".repeat(plot_width.saturating_sub(22)),
+        format_chart_time(app.range.end)
+    )));
+    lines.push(Line::from(vec![
+        Span::styled("─ 上传", Style::default().fg(app.palette.upload)),
+        Span::raw("   "),
+        Span::styled("┄ 下载", Style::default().fg(app.palette.download)),
+        Span::raw("   "),
+        Span::styled("━ 合计", Style::default().fg(app.palette.total)),
+        Span::raw("   "),
+        Span::styled("┼ 交叠", Style::default().fg(app.palette.accent)),
+    ]));
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn draw_apps(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
@@ -751,26 +777,6 @@ fn draw_empty(frame: &mut Frame<'_>, area: Rect, message: &str, title: &str) {
     );
 }
 
-fn aggregate_samples(samples: &[TrafficSample], maximum_points: usize) -> Vec<(i64, u64, u64)> {
-    if samples.is_empty() {
-        return Vec::new();
-    }
-    let target = maximum_points.clamp(2, 500);
-    let group_size = samples.len().div_ceil(target).max(1);
-    samples
-        .chunks(group_size)
-        .map(|chunk| {
-            let upload = chunk
-                .iter()
-                .fold(0u64, |total, row| total.saturating_add(row.upload));
-            let download = chunk
-                .iter()
-                .fold(0u64, |total, row| total.saturating_add(row.download));
-            (chunk[0].bucket, upload, download)
-        })
-        .collect()
-}
-
 fn clamp_selection(state: &mut TableState, length: usize) {
     if length == 0 {
         state.select(None);
@@ -841,11 +847,11 @@ fn human_bytes(bytes: u64) -> String {
 
 fn interval_label(seconds: i64) -> String {
     if seconds < 3_600 {
-        format!("{} 分", seconds / 60)
+        format!("{}分钟", seconds / 60)
     } else if seconds < 86_400 {
-        format!("{} 小时", seconds / 3_600)
+        format!("{}小时", seconds / 3_600)
     } else {
-        format!("{} 天", seconds / 86_400)
+        format!("{}天", seconds / 86_400)
     }
 }
 
@@ -924,6 +930,7 @@ mod tests {
     use super::*;
     use flowwatch_core::AppIdentity;
     use ratatui::backend::TestBackend;
+    use unicode_width::UnicodeWidthStr;
 
     fn empty_app(no_color: bool) -> App {
         App {
@@ -996,6 +1003,8 @@ mod tests {
         let compact = content.replace(' ', "");
         assert!(compact.contains("实际流量"));
         assert!(compact.contains("没有流量记录"));
+        assert!(compact.contains("q退出"));
+        assert!(UnicodeWidthStr::width(DASHBOARD_HELP) <= MINIMUM_WIDTH as usize);
 
         let backend = TestBackend::new(60, 10);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -1011,21 +1020,78 @@ mod tests {
     }
 
     #[test]
-    fn no_color_palette_and_aggregation_are_stable() {
+    fn no_color_palette_has_visible_selected_tab() {
         let palette = Palette::new(true);
         assert_eq!(palette.accent, Color::Reset);
         assert_eq!(palette.warning, Color::Reset);
-        let samples = (0..1_000)
-            .map(|index| TrafficSample {
-                bucket: index,
-                upload: 1,
-                download: 2,
+        assert!(
+            palette
+                .selected_tab_style()
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+        assert!(
+            !(palette
+                .selected_tab_style()
+                .add_modifier
+                .contains(Modifier::UNDERLINED))
+        );
+    }
+
+    #[test]
+    fn labels_and_overview_use_plain_chinese() {
+        assert_eq!(interval_label(60), "1分钟");
+
+        let mut app = empty_app(false);
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let content = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+            .replace(' ', "");
+
+        assert!(content.contains("统计范围"));
+        assert!(content.contains("1970-01-0108:01至1970-01-0108:03"));
+    }
+
+    #[test]
+    fn trend_view_shows_interval_and_line_legend() {
+        let mut app = empty_app(true);
+        app.view = View::Trend;
+        app.data.traffic = vec![
+            TrafficSample {
+                bucket: 100,
+                upload: 10,
+                download: 20,
                 interval_seconds: 60,
-            })
-            .collect::<Vec<_>>();
-        let points = aggregate_samples(&samples, 100);
-        assert_eq!(points.len(), 100);
-        assert_eq!(points.iter().map(|point| point.1).sum::<u64>(), 1_000);
-        assert_eq!(points.iter().map(|point| point.2).sum::<u64>(), 2_000);
+            },
+            TrafficSample {
+                bucket: 160,
+                upload: 20,
+                download: 10,
+                interval_seconds: 60,
+            },
+        ];
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let content = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+            .replace(' ', "");
+
+        assert!(content.contains("流量趋势·每1分钟的用量"));
+        assert!(content.contains("─上传"));
+        assert!(content.contains("┄下载"));
+        assert!(content.contains("━合计"));
     }
 }

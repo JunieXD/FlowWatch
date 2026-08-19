@@ -138,20 +138,18 @@ flowwatch dashboard --period 24h
 flowwatch dashboard --date 2026-08-18
 ```
 
-`Tab` 或左右方向键切换视图，上下方向键选择应用或时段，`Enter` 打开详情，`r` 刷新，`q` 退出。界面每 5 秒自动读取一次最新数据，只在主动运行时占用资源。终端过小时会显示所需尺寸；重定向输出等非交互环境会拒绝启动并给出等价的普通查询命令。设置 `NO_COLOR=1` 可停用颜色。
+`Tab` 或左右方向键切换视图，上下方向键选择应用或时段，`Enter` 打开详情，`Esc` 关闭详情，`r` 刷新，`q` 退出。进入 Dashboard 后，底部也会持续显示这些操作提示。界面每 5 秒自动读取一次最新数据，只在主动运行时占用资源。终端过小时会显示所需尺寸；重定向输出等非交互环境会拒绝启动并给出等价的普通查询命令。设置 `NO_COLOR=1` 可停用颜色。
 
 不查阅 README 也可以从终端逐步了解全部功能：运行 `flowwatch --help` 查看快速开始，运行 `flowwatch <命令> --help` 查看该命令的说明、规则和示例，也可以使用 `flowwatch help <命令>`。
 
 状态输出示例：
 
 ```text
-今天
-  实际总量：上传 888.0 MiB  下载 1.9 GiB
-  已识别应用：上传 782.4 MiB  下载 1.3 GiB（识别率 77.7%）
-  Clash 流量：
-    总量：上传 834.6 MiB  下载 1.5 GiB
-    已识别应用：上传 726.4 MiB  下载 1.2 GiB
-    未识别：上传 108.2 MiB  下载 307.2 MiB
+今天（2026-08-19 00:00 至 18:00）
+  实际流量：上传 888.0 MiB  下载 1.9 GiB  合计 2.7 GiB
+  已识别应用：上传 782.4 MiB  下载 1.3 GiB  合计 2.1 GiB（识别率 77.7%）
+  未找到应用：上传 105.6 MiB  下载 614.4 MiB  合计 720.0 MiB
+  Clash：总量上传 834.6 MiB  下载 1.5 GiB；已找到应用上传 726.4 MiB  下载 1.2 GiB（识别率 86.8%）
 ```
 
 ## 统计方式
@@ -264,7 +262,7 @@ flowwatch data compact
 ```sh
 flowwatch update --check
 flowwatch update
-flowwatch update --version 0.2.0
+flowwatch update --version 0.2.1
 ```
 
 更新器只接受 `MAJOR.MINOR.PATCH` 正式版本，自动选择 Apple Silicon 或 Intel 发布包，同时校验发布清单中的 SHA-256 和下载后程序报告的版本。校验全部通过后才由新程序执行安装。自动更新不会降级，也不会修改 SQLite 数据库、Clash 设置、提醒、应用名称或保存期限。

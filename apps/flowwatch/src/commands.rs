@@ -1060,16 +1060,6 @@ fn status(paths: &AppPaths) -> Result<()> {
     let interfaces = database.query_interfaces(start, now + 1)?;
     let attribution_interfaces = database.query_interfaces(attribution_start, now + 1)?;
     let proxy = database.proxy_totals(attribution_start, now + 1)?;
-    let clash_actor_start = meta
-        .get("clash_actor_started_at")
-        .and_then(|value| value.parse::<i64>().ok())
-        .unwrap_or(now.saturating_add(1))
-        .max(attribution_start);
-    let classified_proxy = if clash_actor_start <= now {
-        Some(database.proxy_totals(clash_actor_start, now + 1)?)
-    } else {
-        None
-    };
     let anomalies = database.direct_attribution_anomalies(attribution_start, now + 1)?;
     let physical = sum_interfaces(&interfaces);
     let attribution_physical = sum_interfaces(&attribution_interfaces);
@@ -1080,15 +1070,6 @@ fn status(paths: &AppPaths) -> Result<()> {
                 (
                     total.0.saturating_add(app.upload()),
                     total.1.saturating_add(app.download()),
-                )
-            });
-    let unknown_clash =
-        apps.iter()
-            .filter(|usage| !usage.app.is_known())
-            .fold((0u64, 0u64), |total, app| {
-                (
-                    total.0.saturating_add(app.clash_upload),
-                    total.1.saturating_add(app.clash_download),
                 )
             });
     let pid = meta
@@ -1139,107 +1120,61 @@ fn status(paths: &AppPaths) -> Result<()> {
         );
     }
     println!();
-    println!("今天");
     println!(
-        "  实际总量：上传 {}  下载 {}",
+        "今天（{} 至 {}）",
+        format_timestamp(start),
+        format_timestamp(now)
+    );
+    println!(
+        "  实际流量：上传 {}  下载 {}  合计 {}",
         human_bytes(physical.0),
-        human_bytes(physical.1)
+        human_bytes(physical.1),
+        human_bytes(physical.0.saturating_add(physical.1))
     );
     if attribution_start > start {
         println!(
-            "  应用识别从 {} 开始统计",
+            "  应用统计从 {} 开始；此前流量不计入识别率",
             format_timestamp(attribution_start)
         );
     }
     println!(
-        "  已识别应用：上传 {}  下载 {}（{}）",
+        "  已识别应用：上传 {}  下载 {}  合计 {}（{}）",
         human_bytes(attributed.0),
         human_bytes(attributed.1),
+        human_bytes(attributed.0.saturating_add(attributed.1)),
         coverage(attributed, attribution_physical)
     );
+    let unattributed = (
+        attribution_physical.0.saturating_sub(attributed.0),
+        attribution_physical.1.saturating_sub(attributed.1),
+    );
+    println!(
+        "  未找到应用：上传 {}  下载 {}  合计 {}",
+        human_bytes(unattributed.0),
+        human_bytes(unattributed.1),
+        human_bytes(unattributed.0.saturating_add(unattributed.1))
+    );
     if proxy.upload > 0 || proxy.download > 0 {
-        let unattributed = (
+        let clash_unattributed = (
             proxy.upload.saturating_sub(proxy.attributed_upload),
             proxy.download.saturating_sub(proxy.attributed_download),
         );
-        println!("  Clash 流量：");
         println!(
-            "    总量：上传 {}  下载 {}",
+            "  Clash：总量上传 {}  下载 {}；已找到应用上传 {}  下载 {}（{}）",
             human_bytes(proxy.upload),
             human_bytes(proxy.download),
-        );
-        println!(
-            "    已识别应用：上传 {}  下载 {}",
             human_bytes(proxy.attributed_upload),
             human_bytes(proxy.attributed_download),
-        );
-        println!(
-            "    未识别：上传 {}  下载 {}",
-            human_bytes(unattributed.0),
-            human_bytes(unattributed.1),
-        );
-        if unknown_clash.0 > 0 || unknown_clash.1 > 0 {
-            println!(
-                "    未知应用：上传 {}  下载 {}（已计入未识别）",
-                human_bytes(unknown_clash.0),
-                human_bytes(unknown_clash.1),
-            );
-        }
-        println!(
-            "    应用识别：{}",
             coverage(
                 (proxy.attributed_upload, proxy.attributed_download),
                 (proxy.upload, proxy.download),
             )
         );
-        match classified_proxy.filter(|value| value.actor_bytes_known) {
-            Some(classified) => {
-                let non_actor = (
-                    classified.upload.saturating_sub(classified.actor_upload),
-                    classified
-                        .download
-                        .saturating_sub(classified.actor_download),
-                );
-                println!(
-                    "    详细分类从 {} 开始统计：",
-                    format_timestamp(clash_actor_start)
-                );
-                println!(
-                    "      已观察到来源的连接：上传 {}  下载 {}",
-                    human_bytes(classified.actor_upload),
-                    human_bytes(classified.actor_download),
-                );
-                println!(
-                    "      已识别到应用的连接：上传 {}  下载 {}（{}）",
-                    human_bytes(classified.attributed_upload),
-                    human_bytes(classified.attributed_download),
-                    coverage(
-                        (classified.attributed_upload, classified.attributed_download),
-                        (classified.actor_upload, classified.actor_download),
-                    )
-                );
-                println!(
-                    "      内部或未观察到的连接：上传 {}  下载 {}",
-                    human_bytes(non_actor.0),
-                    human_bytes(non_actor.1),
-                );
-            }
-            _ => println!("    详细分类将在采满一个完整分钟后显示。"),
-        }
-        println!("    说明：很短的连接可能在两次采样之间结束，因此只能计入总量。");
-    }
-    let active_clash = meta_number(&meta, "active_clash_flows");
-    let actor_clash = meta_number(&meta, "actor_clash_flows");
-    let identifiable_clash = meta_number(&meta, "identifiable_clash_flows");
-    let metadata_clash = meta_number(&meta, "metadata_identifiable_clash_flows");
-    let fallback_clash = meta_number(&meta, "fallback_identifiable_clash_flows");
-    if active_clash > 0 {
-        println!(
-            "  Clash 连接：活跃 {active_clash} 个，带来源信息 {actor_clash} 个，已识别应用 {identifiable_clash} 个"
-        );
-        if fallback_clash > 0 {
+        if clash_unattributed.0 > 0 || clash_unattributed.1 > 0 {
             println!(
-                "              其中控制器提供 {metadata_clash} 个，本机连接匹配 {fallback_clash} 个"
+                "    其中未找到应用：上传 {}  下载 {}",
+                human_bytes(clash_unattributed.0),
+                human_bytes(clash_unattributed.1)
             );
         }
     }
@@ -1400,27 +1335,17 @@ fn apps(paths: &AppPaths, args: AppsArgs) -> Result<()> {
         table_right("合计", 11),
     );
     for (index, row) in rows.iter().enumerate() {
-        let identity_summary = if row.identity_count > 1 || row.executable_paths.len() > 1 {
-            format!(
-                "（合并显示 {} 个同名程序，来自 {} 个路径）",
-                row.identity_count,
-                row.executable_paths.len(),
-            )
-        } else {
-            String::new()
-        };
         let rank = (index + 1).to_string();
         let upload = human_bytes(row.upload());
         let download = human_bytes(row.download());
         let total = human_bytes(row.upload().saturating_add(row.download()));
         println!(
-            "{} {} {} {}  {}{} [{}]",
+            "{} {} {} {}  {} [{}]",
             table_left(&rank, 4),
             table_right(&upload, 11),
             table_right(&download, 11),
             table_right(&total, 11),
             display_app_name(&row.app.name),
-            identity_summary,
             sources(row),
         );
         if details {
@@ -2773,12 +2698,6 @@ fn meta_timestamp(
         format_timestamp(timestamp),
         human_duration(age)
     )
-}
-
-fn meta_number(meta: &std::collections::BTreeMap<String, String>, key: &str) -> u64 {
-    meta.get(key)
-        .and_then(|value| value.parse().ok())
-        .unwrap_or_default()
 }
 
 fn attribution_window_start(

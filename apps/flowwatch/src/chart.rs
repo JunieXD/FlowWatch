@@ -11,6 +11,36 @@ const UPLOAD: u8 = 1;
 const DOWNLOAD: u8 = 2;
 const TOTAL: u8 = 4;
 
+#[derive(Debug, Clone, Copy, Default)]
+struct PlotCell {
+    mask: u8,
+    directions: [LineDirection; 3],
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+enum LineDirection {
+    #[default]
+    Point,
+    Horizontal,
+    Rising,
+    Falling,
+    Vertical,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlotSeries {
+    Upload,
+    Download,
+    Total,
+    Overlap,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlotGlyph {
+    pub symbol: char,
+    pub series: Option<PlotSeries>,
+}
+
 #[derive(Debug, Clone)]
 pub struct TrafficPoint {
     pub bucket: i64,
@@ -155,54 +185,22 @@ pub fn render_chart(
 ) -> String {
     let height = height.max(2);
     let plot_width = plot_width.max(2);
-    let maximum = chart
-        .points
-        .iter()
-        .filter_map(TrafficPoint::total)
-        .max()
-        .unwrap_or_default();
-    let scale_max = nice_ceiling(maximum);
-    let mut grid = vec![vec![0u8; plot_width]; height];
-
-    draw_series(
-        &mut grid,
-        &chart.points,
-        plot_width,
-        scale_max,
-        |point| point.upload,
-        UPLOAD,
-    );
-    draw_series(
-        &mut grid,
-        &chart.points,
-        plot_width,
-        scale_max,
-        |point| point.download,
-        DOWNLOAD,
-    );
-    draw_series(
-        &mut grid,
-        &chart.points,
-        plot_width,
-        scale_max,
-        TrafficPoint::total,
-        TOTAL,
-    );
+    let grid = build_grid(chart, height, plot_width);
 
     let mut output = String::new();
     for (row_index, row) in grid.iter().enumerate() {
         let tick = row_index == 0 || row_index == height / 2 || row_index + 1 == height;
         if tick {
-            let value =
-                scale_max.saturating_mul((height - 1 - row_index) as u64) / (height - 1) as u64;
+            let value = plot_scale_max(chart).saturating_mul((height - 1 - row_index) as u64)
+                / (height - 1) as u64;
             output.push_str(&pad_left(&axis_bytes(value), 9));
             output.push(' ');
             output.push('┤');
         } else {
             output.push_str("          │");
         }
-        for mask in row {
-            output.push_str(&render_cell(*mask, color));
+        for cell in row {
+            output.push_str(&render_cell(*cell, color));
         }
         output.push('\n');
     }
@@ -214,13 +212,67 @@ pub fn render_chart(
     output
 }
 
+pub fn render_plot(chart: &PreparedChart, height: usize, plot_width: usize) -> Vec<Vec<PlotGlyph>> {
+    build_grid(chart, height.max(2), plot_width.max(2))
+        .iter()
+        .map(|row| row.iter().copied().map(cell_glyph).collect())
+        .collect()
+}
+
+fn build_grid(chart: &PreparedChart, height: usize, plot_width: usize) -> Vec<Vec<PlotCell>> {
+    let scale_max = plot_scale_max(chart);
+    let mut grid = vec![vec![PlotCell::default(); plot_width]; height];
+
+    draw_series(
+        &mut grid,
+        &chart.points,
+        plot_width,
+        scale_max,
+        |point| point.upload,
+        UPLOAD,
+        0,
+    );
+    draw_series(
+        &mut grid,
+        &chart.points,
+        plot_width,
+        scale_max,
+        |point| point.download,
+        DOWNLOAD,
+        1,
+    );
+    draw_series(
+        &mut grid,
+        &chart.points,
+        plot_width,
+        scale_max,
+        TrafficPoint::total,
+        TOTAL,
+        2,
+    );
+    grid
+}
+
+fn chart_maximum(chart: &PreparedChart) -> u64 {
+    chart
+        .points
+        .iter()
+        .filter_map(TrafficPoint::total)
+        .max()
+        .unwrap_or_default()
+}
+
+pub fn plot_scale_max(chart: &PreparedChart) -> u64 {
+    nice_ceiling(chart_maximum(chart))
+}
+
 pub fn legend(color: bool) -> String {
     format!(
         "{} 上传   {} 下载   {} 合计   {} 交叠",
-        styled("•", "96", color),
-        styled("×", "94", color),
-        styled("◆", "93", color),
-        styled("●", "97", color),
+        styled("─", "96", color),
+        styled("┄", "94", color),
+        styled("━", "93", color),
+        styled("┼", "97", color),
     )
 }
 
@@ -279,12 +331,13 @@ fn align_up_from(timestamp: i64, anchor: i64, interval: i64) -> i64 {
 }
 
 fn draw_series<F>(
-    grid: &mut [Vec<u8>],
+    grid: &mut [Vec<PlotCell>],
     points: &[TrafficPoint],
     plot_width: usize,
     scale_max: u64,
     value: F,
     mask: u8,
+    series_index: usize,
 ) where
     F: Fn(&TrafficPoint) -> Option<u64>,
 {
@@ -299,9 +352,9 @@ fn draw_series<F>(
         if let Some((previous_index, previous_x, previous_y)) = previous
             && previous_index + 1 == index
         {
-            draw_segment(grid, previous_x, previous_y, x, y, mask);
+            draw_segment(grid, previous_x, previous_y, x, y, mask, series_index);
         } else {
-            grid[y][x] |= mask;
+            mark_cell(grid, x, y, mask, series_index, LineDirection::Point);
         }
         previous = Some((index, x, y));
     }
@@ -326,27 +379,118 @@ fn point_y(value: u64, scale_max: u64, height: usize) -> usize {
     (height - 1).saturating_sub(usize::try_from(scaled).unwrap_or(height - 1))
 }
 
-fn draw_segment(grid: &mut [Vec<u8>], x0: usize, y0: usize, x1: usize, y1: usize, mask: u8) {
+fn draw_segment(
+    grid: &mut [Vec<PlotCell>],
+    x0: usize,
+    y0: usize,
+    x1: usize,
+    y1: usize,
+    mask: u8,
+    series_index: usize,
+) {
     let dx = x1.abs_diff(x0);
     let dy = y1.abs_diff(y0);
     let steps = dx.max(dy).max(1);
+    let direction = line_direction(x0, y0, x1, y1);
     for step in 0..=steps {
         let ratio = step as f64 / steps as f64;
         let x = (x0 as f64 + (x1 as f64 - x0 as f64) * ratio).round() as usize;
         let y = (y0 as f64 + (y1 as f64 - y0 as f64) * ratio).round() as usize;
-        if let Some(cell) = grid.get_mut(y).and_then(|row| row.get_mut(x)) {
-            *cell |= mask;
+        mark_cell(grid, x, y, mask, series_index, direction);
+    }
+}
+
+fn mark_cell(
+    grid: &mut [Vec<PlotCell>],
+    x: usize,
+    y: usize,
+    mask: u8,
+    series_index: usize,
+    direction: LineDirection,
+) {
+    if let Some(cell) = grid.get_mut(y).and_then(|row| row.get_mut(x)) {
+        cell.mask |= mask;
+        if let Some(slot) = cell.directions.get_mut(series_index) {
+            *slot = direction;
         }
     }
 }
 
-fn render_cell(mask: u8, color: bool) -> String {
-    match mask {
-        0 => " ".to_string(),
-        UPLOAD => styled("•", "96", color),
-        DOWNLOAD => styled("×", "94", color),
-        TOTAL => styled("◆", "93", color),
-        _ => styled("●", "97", color),
+fn line_direction(x0: usize, y0: usize, x1: usize, y1: usize) -> LineDirection {
+    match (x0 == x1, y0.cmp(&y1)) {
+        (true, _) => LineDirection::Vertical,
+        (_, std::cmp::Ordering::Equal) => LineDirection::Horizontal,
+        (_, std::cmp::Ordering::Greater) => LineDirection::Rising,
+        (_, std::cmp::Ordering::Less) => LineDirection::Falling,
+    }
+}
+
+fn render_cell(cell: PlotCell, color: bool) -> String {
+    let glyph = cell_glyph(cell);
+    match glyph.series {
+        None => " ".to_string(),
+        Some(PlotSeries::Upload) => styled(&glyph.symbol.to_string(), "96", color),
+        Some(PlotSeries::Download) => styled(&glyph.symbol.to_string(), "94", color),
+        Some(PlotSeries::Total) => styled(&glyph.symbol.to_string(), "93", color),
+        Some(PlotSeries::Overlap) => styled(&glyph.symbol.to_string(), "97", color),
+    }
+}
+
+fn cell_glyph(cell: PlotCell) -> PlotGlyph {
+    match cell.mask {
+        0 => PlotGlyph {
+            symbol: ' ',
+            series: None,
+        },
+        UPLOAD => PlotGlyph {
+            symbol: series_symbol(0, cell.directions[0]),
+            series: Some(PlotSeries::Upload),
+        },
+        DOWNLOAD => PlotGlyph {
+            symbol: series_symbol(1, cell.directions[1]),
+            series: Some(PlotSeries::Download),
+        },
+        mask if mask & TOTAL != 0 => PlotGlyph {
+            symbol: series_symbol(2, cell.directions[2]),
+            series: Some(PlotSeries::Total),
+        },
+        _ => PlotGlyph {
+            symbol: overlap_symbol(cell),
+            series: Some(PlotSeries::Overlap),
+        },
+    }
+}
+
+fn overlap_symbol(cell: PlotCell) -> char {
+    if cell
+        .directions
+        .iter()
+        .any(|direction| matches!(direction, LineDirection::Rising | LineDirection::Falling))
+    {
+        '╳'
+    } else if cell
+        .directions
+        .iter()
+        .any(|direction| matches!(direction, LineDirection::Vertical))
+    {
+        '╂'
+    } else {
+        '┼'
+    }
+}
+
+fn series_symbol(series_index: usize, direction: LineDirection) -> char {
+    let (horizontal, vertical, rising, falling, point) = match series_index {
+        0 => ('─', '│', '╱', '╲', '●'),
+        1 => ('┄', '┆', '╱', '╲', '▪'),
+        _ => ('━', '┃', '╱', '╲', '◆'),
+    };
+    match direction {
+        LineDirection::Point => point,
+        LineDirection::Horizontal => horizontal,
+        LineDirection::Rising => rising,
+        LineDirection::Falling => falling,
+        LineDirection::Vertical => vertical,
     }
 }
 
@@ -523,9 +667,9 @@ mod tests {
         let output = render_chart(&chart, 8, 20, false);
         assert!(output.contains('┤'));
         assert!(output.contains('└'));
-        assert!(output.contains('•'));
-        assert!(output.contains('×'));
-        assert!(output.contains('◆'));
+        assert!(output.contains('─') || output.contains('╱') || output.contains('╲'));
+        assert!(legend(false).contains('┄'));
+        assert!(legend(false).contains('━'));
         assert!(!output.contains("\x1b["));
         assert_eq!(output.lines().count(), 10);
         assert!(
@@ -534,5 +678,49 @@ mod tests {
                 .all(|line| UnicodeWidthStr::width(line) == 31)
         );
         assert!(legend(true).contains("\x1b[96m"));
+    }
+
+    #[test]
+    fn plot_renderer_connects_points_and_marks_overlaps() {
+        let chart = PreparedChart {
+            points: vec![
+                TrafficPoint {
+                    bucket: 0,
+                    upload: Some(10),
+                    download: Some(20),
+                },
+                TrafficPoint {
+                    bucket: 60,
+                    upload: Some(20),
+                    download: Some(10),
+                },
+            ],
+            interval_seconds: 60,
+            adjusted_for_daily_data: false,
+        };
+        let plot = render_plot(&chart, 8, 20);
+        let glyphs = plot.iter().flatten().collect::<Vec<_>>();
+
+        assert!(
+            glyphs
+                .iter()
+                .any(|glyph| matches!(glyph.symbol, '─' | '┄' | '━' | '╱' | '╲' | '│' | '┆' | '┃'))
+        );
+        let overlap = cell_glyph(PlotCell {
+            mask: UPLOAD | DOWNLOAD,
+            directions: [
+                LineDirection::Horizontal,
+                LineDirection::Horizontal,
+                LineDirection::Point,
+            ],
+        });
+        assert_eq!(overlap.series, Some(PlotSeries::Overlap));
+        assert_eq!(overlap.symbol, '┼');
+
+        let total_wins_collision = cell_glyph(PlotCell {
+            mask: UPLOAD | DOWNLOAD | TOTAL,
+            directions: [LineDirection::Point; 3],
+        });
+        assert_eq!(total_wins_collision.series, Some(PlotSeries::Total));
     }
 }
