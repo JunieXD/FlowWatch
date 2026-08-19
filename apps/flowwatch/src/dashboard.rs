@@ -1054,7 +1054,9 @@ mod tests {
             .replace(' ', "");
 
         assert!(content.contains("统计范围"));
-        assert!(content.contains("1970-01-0108:01至1970-01-0108:03"));
+        let expected_range =
+            format!("{}至{}", format_timestamp(100), format_timestamp(200)).replace(' ', "");
+        assert!(content.contains(&expected_range));
     }
 
     #[test]
